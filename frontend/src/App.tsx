@@ -836,7 +836,7 @@ function App(): JSX.Element {
     <div className="app">
       {/* Header */}
       <div className="header">
-        <h1>Excalidraw Canvas</h1>
+        <h1>Excalidraw AI</h1>
         <div className="controls">
           <div className="status">
             <div className={`status-dot ${isConnected ? 'status-connected' : 'status-disconnected'}`}></div>
@@ -893,8 +893,7 @@ function App(): JSX.Element {
             initialData={{
               elements: [],
               appState: {
-                theme: 'light',
-                viewBackgroundColor: '#ffffff'
+                theme: 'dark'
               }
             }}
           />

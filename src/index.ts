@@ -7,8 +7,10 @@ process.env.NO_COLOR = '1';
 import { fileURLToPath } from "url";
 import { deflateSync } from 'zlib';
 import { webcrypto } from 'crypto';
+import { randomUUID } from 'node:crypto';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { NodeStreamableHTTPServerTransport } from '@modelcontextprotocol/node';
 import { 
   CallToolRequestSchema, 
   ListToolsRequestSchema,
@@ -19,6 +21,8 @@ import { z } from 'zod';
 import dotenv from 'dotenv';
 import fs from 'fs';
 import path from 'path';
+import express from 'express';
+import cors from 'cors';
 import logger from './utils/logger.js';
 import {
   generateId,
@@ -51,6 +55,18 @@ function sanitizeFilePath(filePath: string): string {
 // Express server configuration
 const EXPRESS_SERVER_URL = process.env.EXPRESS_SERVER_URL || 'http://localhost:3000';
 const ENABLE_CANVAS_SYNC = process.env.ENABLE_CANVAS_SYNC !== 'false'; // Default to true
+
+// MCP Server transport configuration
+const MCP_TRANSPORT = process.env.MCP_TRANSPORT || 'stdio';
+const MCP_HOST = process.env.MCP_HOST || '0.0.0.0';
+const MCP_PORT = parseInt(process.env.MCP_PORT || '3100', 10);
+const DEBUG = process.env.DEBUG === 'true';
+const ENABLE_JSON_RESPONSE = process.env.ENABLE_JSON_RESPONSE !== 'false';
+
+// Override logger level if DEBUG is set
+if (DEBUG) {
+  logger.level = 'debug';
+}
 
 // API Response types
 interface ApiResponse {
@@ -2232,18 +2248,129 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
   return { tools };
 });
 
-// Start server
+// Store transports by session ID for stateful HTTP mode
+const transports: Map<string, NodeStreamableHTTPServerTransport> = new Map();
+
+// Express app for streamable HTTP mode
+const mcpApp = express();
+
+// Fix Accept header - ensure both JSON and SSE formats for MCP compatibility
+mcpApp.use(function earlyAcceptFix(req: any, res: any, next: () => void) {
+  const accept = req.headers?.accept;
+  if (accept && !accept.includes('text/event-stream')) {
+    const fixed = accept.includes('application/json')
+      ? accept + ', text/event-stream'
+      : 'application/json, text/event-stream';
+    req.headers.accept = fixed;
+  }
+  next();
+});
+
+mcpApp.use(express.json({ limit: '10mb' }));
+mcpApp.use(cors({
+  exposedHeaders: ['Mcp-Session-Id', 'Mcp-Protocol-Version'],
+  origin: '*'
+}));
+mcpApp.use((err: Error, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  logger.error(`Express error: ${err.message}`, { error: err });
+  res.status(500).json({ error: err.message });
+});
+
+// Streamable HTTP endpoint
+mcpApp.post('/mcp', async (req, res) => {
+  const sessionId = req.headers['mcp-session-id'] as string | undefined;
+
+  try {
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id,Mcp-Protocol-Version');
+    
+    let transport: NodeStreamableHTTPServerTransport | undefined;
+    if (sessionId) {
+      transport = transports.get(sessionId);
+    }
+    
+    if (!transport) {
+      transport = new NodeStreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        onsessioninitialized: (sid: string) => {
+          transports.set(sid, transport!);
+          res.setHeader('Mcp-Session-Id', sid);
+        }
+      });
+      
+      transport.onclose = () => {
+        if (transport && transport.sessionId) {
+          transports.delete(transport.sessionId);
+        }
+      };
+      
+      await server.connect(transport);
+    }
+    
+    await transport.handleRequest(req, res, req.body);
+  } catch (error) {
+    logger.error(`POST error: ${(error as Error).message}`, { error });
+    if (!res.writableEnded) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  }
+});
+
+// Streamable HTTP GET endpoint for SSE (server-to-client messages)
+mcpApp.get('/mcp', async (req, res) => {
+  const sessionId = req.headers['mcp-session-id'] as string || req.query.sessionId as string;
+
+  try {
+    const existingTransport = sessionId && transports.get(sessionId);
+    if (existingTransport) {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      await existingTransport.handleRequest(req, res);
+      if (!res.writableEnded) res.end();
+    } else {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.write(': keepalive\n\n');
+      res.end();
+    }
+  } catch (error) {
+    logger.error(`GET error: ${(error as Error).message}`);
+    if (!res.writableEnded) res.status(500).end();
+  }
+});
+
+// Health check endpoint
+mcpApp.get('/health', (_req, res) => {
+  res.json({
+    status: 'healthy',
+    transport: MCP_TRANSPORT,
+    endpoints: ['/mcp', '/health']
+  });
+});
+
+// Start server based on transport mode
 async function runServer(): Promise<void> {
   try {
-    logger.info('Starting Excalidraw MCP server...');
+    logger.info(`Transport mode: ${MCP_TRANSPORT}, Debug: ${DEBUG}`);
+    if (MCP_TRANSPORT === 'http') {
+      logger.info(`Starting Excalidraw MCP server on http://${MCP_HOST}:${MCP_PORT}`);
+      
+      await new Promise<void>((resolve) => {
+        mcpApp.listen(MCP_PORT, MCP_HOST, () => {
+          logger.info(`MCP server listening on http://${MCP_HOST}:${MCP_PORT}`);
+          resolve();
+        });
+      });
+    } else {
+      logger.info('Starting Excalidraw MCP server on stdio...');
 
-    const transport = new StdioServerTransport();
-    logger.debug('Connecting to stdio transport...');
+      const transport = new StdioServerTransport();
+      logger.debug('Connecting to stdio transport...');
 
-    await server.connect(transport);
-    logger.info('Excalidraw MCP server running on stdio');
+      await server.connect(transport);
+      logger.info('Excalidraw MCP server running on stdio');
 
-    process.stdin.resume();
+      process.stdin.resume();
+    }
   } catch (error) {
     logger.error('Error starting server:', error);
     process.stderr.write(`Failed to start MCP server: ${(error as Error).message}\n${(error as Error).stack}\n`);

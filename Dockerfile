@@ -48,6 +48,9 @@ USER nodejs
 ENV NODE_ENV=production
 ENV EXPRESS_SERVER_URL=http://localhost:3000
 ENV ENABLE_CANVAS_SYNC=true
+ENV LOG_LEVEL=info
+# To enable HTTP transport: uncomment the following line
+# ENV MCP_TRANSPORT=http
 
 # Run MCP server (stdin/stdout protocol)
 CMD ["node", "dist/index.js"]

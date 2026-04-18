@@ -42,13 +42,16 @@ services:
       dockerfile: Dockerfile
     image: mcp-excalidraw:latest
     container_name: mcp-excalidraw-mcp
-    stdin_open: true
-    tty: true
+    ports:
+      - "3100:3100"
     environment:
       - NODE_ENV=production
       - EXPRESS_SERVER_URL=http://canvas:3000
       - ENABLE_CANVAS_SYNC=true
-      - DEBUG=false
+      - MCP_TRANSPORT=http
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=3100
+      - LOG_LEVEL=info
     depends_on:
       canvas:
         condition: service_healthy

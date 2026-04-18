@@ -133,6 +133,30 @@ The MCP server runs over stdio and can be configured with any MCP-compatible cli
 |----------|-------------|---------|
 | `EXPRESS_SERVER_URL` | URL of the canvas server | `http://localhost:3000` |
 | `ENABLE_CANVAS_SYNC` | Enable real-time canvas sync | `true` |
+| `MCP_TRANSPORT` | Transport mode: `stdio` or `http` | `stdio` |
+| `MCP_HOST` | HTTP server host (when MCP_TRANSPORT=http) | `0.0.0.0` |
+| `MCP_PORT` | HTTP server port (when MCP_TRANSPORT=http) | `3100` |
+| `LOG_LEVEL` | Logging level: `debug`, `info`, `warn`, `error` | `info` |
+| `DEBUG` | Enable debug mode (sets LOG_LEVEL=debug) | `false` |
+
+### Using HTTP Transport
+
+By default, the MCP server uses stdio transport (for Claude Desktop, etc.). To enable HTTP transport for external clients like OpenWebUI:
+
+```bash
+# Set environment variable
+MCP_TRANSPORT=http node dist/index.js
+```
+
+The server will listen on `http://0.0.0.0:3100` with endpoints:
+- `POST /mcp` - JSON-RPC over HTTP
+- `GET /mcp` - Server-Sent Events for responses
+- `GET /health` - Health check
+
+**Docker with HTTP transport:**
+```bash
+docker run -p 3100:3100 -e MCP_TRANSPORT=http mcp-excalidraw
+```
 
 ---
 

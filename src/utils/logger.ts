@@ -1,9 +1,10 @@
 import winston from 'winston';
 
 const LOG_FILE_PATH = process.env.LOG_FILE_PATH || 'excalidraw.log';
+const logLevel = process.env.LOG_LEVEL || 'info';
 
 const logger: winston.Logger = winston.createLogger({
-  level: process.env.LOG_LEVEL || 'info',
+  level: logLevel,
 
   format: winston.format.combine(
     winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss.SSS' }),
@@ -19,12 +20,12 @@ const logger: winston.Logger = winston.createLogger({
 
   transports: [
     new winston.transports.Console({
-      level: 'warn',                 // only warn+error to stderr
-      stderrLevels: ['warn','error']
+      level: logLevel,
+      stderrLevels: ['warn', 'error']
     }),
 
     new winston.transports.File({
-      filename: LOG_FILE_PATH,    // all levels to file
+      filename: LOG_FILE_PATH,
       level: 'debug'
     })
   ]
