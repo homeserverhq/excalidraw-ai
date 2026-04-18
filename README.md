@@ -145,7 +145,7 @@ By default, the MCP server uses stdio transport (for Claude Desktop, etc.). To e
 
 ```bash
 # Set environment variable
-MCP_TRANSPORT=http node dist/index.js
+MCP_TRANSPORT=http
 ```
 
 The server will listen on `http://0.0.0.0:3100` with endpoints:
