@@ -1,0 +1,28 @@
+import dotenv from 'dotenv';
+
+// Load environment variables once for every entry point (MCP server, CLI, canvas server)
+dotenv.config();
+
+// Express server configuration
+export const EXPRESS_SERVER_URL = process.env.EXPRESS_SERVER_URL || 'http://127.0.0.1:3000';
+export const ENABLE_CANVAS_SYNC = process.env.ENABLE_CANVAS_SYNC !== 'false'; // Default to true
+
+// MCP server transport configuration. Defaults to stdio for MCP clients;
+// set MCP_TRANSPORT=http to serve the same tools over streamable HTTP.
+export const MCP_TRANSPORT = process.env.MCP_TRANSPORT === 'http' ? 'http' : 'stdio';
+export const MCP_HOST = process.env.MCP_HOST || '0.0.0.0';
+export const MCP_PORT = Number.parseInt(process.env.MCP_PORT || '3100', 10);
+
+// Opt-out for auto-starting the canvas server from the CLI / MCP server
+export const EXCALIDRAW_NO_AUTOSTART = process.env.EXCALIDRAW_NO_AUTOSTART === '1';
+
+// Safe file path validation base directory (see sanitizeFilePath)
+export const ALLOWED_EXPORT_DIR = process.env.EXCALIDRAW_EXPORT_DIR || process.cwd();
+
+// Share target for `share` / `export_to_excalidraw_url`. Defaults to excalidraw.com;
+// point both at a self-hosted Excalidraw whose storage backend speaks the
+// excalidraw-json API (e.g. alswl/excalidraw-storage-backend) to keep links in-house.
+export const EXCALIDRAW_SHARE_UPLOAD_URL =
+  process.env.EXCALIDRAW_SHARE_UPLOAD_URL?.trim() || 'https://json.excalidraw.com/api/v2/post/';
+export const EXCALIDRAW_SHARE_BASE_URL =
+  (process.env.EXCALIDRAW_SHARE_BASE_URL?.trim() || 'https://excalidraw.com').replace(/\/+$/, '');

@@ -106,7 +106,7 @@ export interface ExcalidrawBinding {
   fixedPoint?: readonly [number, number] | null;
 }
 
-export type ExcalidrawElementType = 'rectangle' | 'ellipse' | 'diamond' | 'arrow' | 'text' | 'line' | 'freedraw' | 'image';
+export type ExcalidrawElementType = 'rectangle' | 'ellipse' | 'diamond' | 'arrow' | 'text' | 'line' | 'freedraw' | 'image' | 'frame';
 
 // Excalidraw element types
 export const EXCALIDRAW_ELEMENT_TYPES: Record<string, ExcalidrawElementType> = {
@@ -117,7 +117,8 @@ export const EXCALIDRAW_ELEMENT_TYPES: Record<string, ExcalidrawElementType> = {
   TEXT: 'text',
   FREEDRAW: 'freedraw',
   LINE: 'line',
-  IMAGE: 'image'
+  IMAGE: 'image',
+  FRAME: 'frame'
 } as const;
 
 // Server-side element with metadata
@@ -257,11 +258,30 @@ export interface CanvasClearedMessage extends WebSocketMessage {
 }
 
 // Image export types
+export type ImageRenderer = 'auto' | 'node' | 'browser';
+
+// Options accepted by POST /api/export/image, the CLI `screenshot` command and
+// the MCP export/screenshot tools. `auto` renders headless in the server
+// (node); `browser` uses an open canvas tab (Excalidraw's own rendering).
+export interface ExportImageOptions {
+  format: 'png' | 'svg';
+  background?: boolean;
+  renderer?: ImageRenderer;
+  dark?: boolean;
+  scale?: number;
+  padding?: number;
+  elementIds?: string[];
+  frameId?: string;
+  embedFonts?: boolean;
+  embedScene?: boolean;
+}
+
 export interface ExportImageRequestMessage extends WebSocketMessage {
   type: 'export_image_request';
   requestId: string;
   format: 'png' | 'svg';
   background?: boolean;
+  options?: Omit<ExportImageOptions, 'format' | 'renderer'>;
 }
 
 // Viewport control types
@@ -270,6 +290,8 @@ export interface SetViewportMessage extends WebSocketMessage {
   requestId: string;
   scrollToContent?: boolean;
   scrollToElementId?: string;
+  scrollToElementIds?: string[];
+  viewportZoomFactor?: number;
   zoom?: number;
   offsetX?: number;
   offsetY?: number;

@@ -2,8 +2,64 @@
 
 ## Defaults
 
-- Canvas base URL: `EXPRESS_SERVER_URL` (default `http://localhost:3000`)
-- Canvas health: `GET /health`
+- Canvas base URL: `EXPRESS_SERVER_URL` (default `http://127.0.0.1:3000`); CLI also accepts `--url <canvasUrl>`
+- Canvas health: `GET /health` or `npx -y mcp-excalidraw-server status`
+- Auto-start: any canvas-touching CLI command starts the server if it's down (opt out with `EXCALIDRAW_NO_AUTOSTART=1`)
+
+## CLI Reference
+
+`npx -y mcp-excalidraw-server <command>` (or `excalidraw-canvas <command>` after `npm i -g`).
+JSON results on stdout — except `describe` (plain text) and raw-content output when `--out` is omitted (`export` scene JSON, `screenshot --format svg`). Diagnostics on stderr. Exit codes: 0 ok, 1 error, 2 usage, 3 canvas unreachable, 4 browser tab required (only `mermaid` and `screenshot --renderer browser`). Explicit `start` overrides `EXCALIDRAW_NO_AUTOSTART=1`.
+
+### Server
+
+| Command | Description |
+|---------|-------------|
+| `start` | Start the canvas server (detached); prints URL + pid |
+| `stop` | Stop the canvas server (identity-checked via `/health` — never signals foreign services) |
+| `status` | Health, element count, renderers (`node` headless + browser tabs) |
+
+### Elements
+
+| Command | Description |
+|---------|-------------|
+| `add [file\|-]` | Batch create from a JSON array (file, `-`, or piped stdin); `--one '{...}'` for a single element |
+| `apply [file\|-]` | Multi-op patch `{"create":[...],"update":[{"id":"a","set":{...}}],"delete":["id",...]}` in one call |
+| `get <id>` | Get one element |
+| `query` | `--type rectangle` `--bbox x0,y0,x1,y1` `--filter locked=true` (typed; nested keys like `label.text=API` work) `--filter-json '{...}'` |
+| `update <id> --set '{...}'` | Update one element |
+| `delete <id> [...]` | Delete elements |
+
+### Scene
+
+| Command | Description |
+|---------|-------------|
+| `describe` | AI-readable scene summary (ids, positions, labels, connections) — plain text |
+| `screenshot` | Headless PNG/SVG render of the canvas (no browser tab); `--out f.png\|f.svg`, `--format png\|svg`, `--scale 1-4`, `--dark`, `--padding N`, `--no-background`, `--ids a,b`, `--frame <id>`, `--no-embed-fonts`, `--embed-scene` (PNG only, opt-in), `--renderer browser` (use an open tab instead); PNG without `--out` → temp file path in JSON, SVG without `--out` → raw SVG |
+| `render [file\|-]` | Render a `.excalidraw` / `.excalidraw.md` / embedded-scene PNG file to PNG/SVG offline — no canvas server; same flags as `screenshot` |
+| `export [--out f.excalidraw] [--format json\|obsidian]` | Scene as .excalidraw JSON (stdout without `--out`); a `.md` out path writes Obsidian's .excalidraw.md format |
+| `import [file\|-] [--replace]` | Import .excalidraw JSON, Obsidian .excalidraw.md, or PNG with an embedded scene (merge by default; binary stdin supported) |
+| `mermaid [file\|-]` | Render Mermaid onto the canvas (**browser tab required**) |
+| `share` | Encrypted upload → shareable excalidraw.com URL |
+| `clear --yes` | Wipe the canvas |
+| `snapshot save\|list\|restore [name]` | Named canvas snapshots |
+
+### Arrange
+
+| Command | Description |
+|---------|-------------|
+| `arrange align --ids a,b,c --to left\|center\|right\|top\|middle\|bottom` | Align (≥2 ids) |
+| `arrange distribute --ids a,b,c --to horizontal\|vertical` | Even spacing (≥3 ids) |
+| `arrange group --ids a,b` / `arrange ungroup --group <groupId>` | Group membership lives on element `groupIds` |
+| `arrange lock\|unlock --ids a,b` | Toggle edit lock |
+| `arrange duplicate --ids a,b [--offset 20,20]` | Clone with offset |
+
+### Meta
+
+| Command | Description |
+|---------|-------------|
+| `install-skill --dir <skills-root>` | Install this skill into an agent-chosen project/global skills root (replaces any existing copy) |
+| `help [command]`, `--version` | Usage and version |
 
 ## MCP Tools (26 total)
 
@@ -15,7 +71,7 @@
 | `get_element` | Get single element by ID | `id` |
 | `update_element` | Update element properties | `id` |
 | `delete_element` | Delete element | `id` |
-| `query_elements` | Query by type/filters | (optional) `type`, `filter` |
+| `query_elements` | Query by type/filters | (optional) `type`, `filter`, `bbox` |
 | `batch_create_elements` | Create many at once | `elements[]` |
 | `duplicate_elements` | Clone with offset | `elementIds[]`, (optional) `offsetX`, `offsetY` |
 
@@ -35,16 +91,16 @@
 | Tool | Description | Required params |
 |------|-------------|-----------------|
 | `describe_scene` | AI-readable scene description (types, positions, labels, connections, bounding box) | (none) |
-| `get_canvas_screenshot` | Returns PNG image of canvas for visual verification | (optional) `background` |
+| `get_canvas_screenshot` | Returns a PNG of the canvas for visual verification (headless, no browser needed) | (optional) `background`, `dark`, `scale` (1-4), `padding`, `elementIds`, `frameId`, `renderer` ("auto"\|"node"\|"browser") |
 | `get_resource` | Get scene/library/theme/elements | `resource` |
 
 ### File I/O & Export
 
 | Tool | Description | Required params |
 |------|-------------|-----------------|
-| `export_scene` | Export to .excalidraw JSON | (optional) `filePath` |
-| `import_scene` | Import from .excalidraw JSON | `mode` ("replace"\|"merge"), `filePath` or `data` |
-| `export_to_image` | Export to PNG/SVG (needs browser) | `format` ("png"\|"svg"), (optional) `filePath`, `background` |
+| `export_scene` | Export to .excalidraw JSON (a `.md` filePath → Obsidian .excalidraw.md) | (optional) `filePath` |
+| `import_scene` | Import from .excalidraw JSON or Obsidian .excalidraw.md | `mode` ("replace"\|"merge"), `filePath` or `data` |
+| `export_to_image` | Export to PNG/SVG (headless, no browser needed; SVG embeds fonts) | `format` ("png"\|"svg"), (optional) `filePath`, `background`, `dark`, `scale` (1-4), `padding`, `elementIds`, `frameId`, `renderer` ("auto"\|"node"\|"browser") |
 | `export_to_excalidraw_url` | Upload & get shareable excalidraw.com URL | (none) |
 
 ### State Management
@@ -59,7 +115,7 @@
 
 | Tool | Description | Required params |
 |------|-------------|-----------------|
-| `set_viewport` | Control camera: zoom-to-fit, center on element, manual zoom/scroll (needs browser) | (optional) `scrollToContent`, `scrollToElementId`, `zoom`, `offsetX`, `offsetY` |
+| `set_viewport` | Control camera: zoom-to-fit all/selected elements, center one element without changing zoom, or manual zoom/scroll (needs browser); specify one mode per request | (optional) `scrollToContent`, `scrollToElementIds`, `viewportZoomFactor` (0, 1], `scrollToElementId`, `zoom`, `offsetX`, `offsetY` |
 
 ### Design Guide
 
@@ -74,9 +130,10 @@
 | `create_from_mermaid` | Mermaid diagram to Excalidraw | `mermaidDiagram` |
 
 Notes:
-- **MCP tools**: Set `text` field on shapes to label them (auto-converts to `label.text`). Use `startElementId`/`endElementId` on arrows.
-- **REST API**: Use `"label": {"text": "..."}` for shape labels. Use `"start": {"id": "..."}` / `"end": {"id": "..."}` for arrow binding. (Different format from MCP!)
-- `fontFamily` must be a string (e.g. `"1"`) or omit it entirely — do NOT pass a number.
+- **CLI + MCP**: Set `text` on shapes to label them (auto-converts to `label.text`). Use `startElementId`/`endElementId` on arrows.
+- **CLI `apply.update`**: Update entries can use either direct fields (`{"id":"a","x":120}`) or a `set` object (`{"id":"a","set":{"x":120}}`). Do not mix both forms in one update entry.
+- **Raw REST**: Use `"label": {"text": "..."}` for shape labels. Use `"start": {"id": "..."}` / `"end": {"id": "..."}` for arrow binding. (Different format!)
+- `fontFamily` must be a string (e.g. `"1"`, `"helvetica"`) or omitted — do NOT pass a number.
 - `points` accepts both `[[x,y]]` tuples and `[{x,y}]` objects.
 - **Curved arrows**: Use `"roundness": {"type": 2}` with 3+ points for smooth curves. Use `"elbowed": true` for right-angle routing.
 - Prefer creating shapes first, then arrows, then alignment/grouping.
@@ -93,7 +150,7 @@ Notes:
 | `PUT` | `/api/elements/:id` | Update element |
 | `DELETE` | `/api/elements/:id` | Delete element |
 | `DELETE` | `/api/elements/clear` | Clear all elements |
-| `GET` | `/api/elements/search?type=...` | Search with filters |
+| `GET` | `/api/elements/search?type=...` | Search with filters (exact string match + bbox) |
 | `POST` | `/api/elements/batch` | Batch create |
 | `POST` | `/api/elements/sync` | Overwrite import (clear + write) |
 | `POST` | `/api/elements/from-mermaid` | Mermaid conversion via frontend |
@@ -102,14 +159,14 @@ Notes:
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/export/image` | Request image export (needs frontend) |
+| `POST` | `/api/export/image` | Render PNG/SVG headless: `{format, background?, renderer?: "auto"\|"node"\|"browser", dark?, scale?, padding?, elementIds?, frameId?, embedFonts?, embedScene?}` → `{data, renderer, width, height, warnings?}`; `embedScene` makes PNG editable (default false) |
 | `POST` | `/api/export/image/result` | Frontend posts export result back |
 
 ### Viewport
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/viewport` | Set viewport/camera (needs frontend) |
+| `POST` | `/api/viewport` | Set viewport/camera; body may include `scrollToContent`, `scrollToElementIds`, `viewportZoomFactor`, `scrollToElementId`, `zoom`, `offsetX`, `offsetY` (needs frontend) |
 | `POST` | `/api/viewport/result` | Frontend posts viewport result back |
 
 ### Snapshots
@@ -124,19 +181,13 @@ Notes:
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/health` | Health check |
+| `GET` | `/health` | Health check (`websocket_clients` = open browser tabs, `renderers` = `{node, browser}`) |
 | `GET` | `/api/sync/status` | Memory/WebSocket stats |
 
-## Skill Scripts
+## Design Guide (quick version)
 
-All scripts accept `--url <canvasUrl>` (defaults to `EXPRESS_SERVER_URL`).
-
-```bash
-node scripts/healthcheck.cjs
-node scripts/clear-canvas.cjs
-node scripts/export-elements.cjs --out diagram.elements.json
-node scripts/import-elements.cjs --in diagram.elements.json --mode batch|sync
-node scripts/create-element.cjs --data '{...}'
-node scripts/update-element.cjs --id <id> --data '{...}'
-node scripts/delete-element.cjs --id <id>
-```
+Stroke/fill pairs: `#e03131`/`#ffc9c9` red, `#2f9e44`/`#b2f2bb` green, `#1971c2`/`#a5d8ff` blue, `#9c36b5`/`#eebefa` purple, `#e8590c`/`#ffd8a8` orange, `#0c8599`/`#99e9f2` cyan, `#868e96`/`#e9ecef` gray.
+Styling: `"fillStyle": "solid"` for crisp flat fills (default is sketchy hachure); `"strokeStyle": "dashed"` for zone borders / async arrows.
+Sizing: shapes ≥ 120×60 with width ≥ `labelChars * 12`, fonts ≥ 16 (titles ≥ 20), gaps 40–80px (120px+ for labeled arrows), align to a 20px grid.
+Order of work: background zones → primary shapes (with `text`) → arrows (bound via ids) → annotations → refine (align/distribute/screenshot).
+MCP mode has the full guide behind the `read_diagram_guide` tool.

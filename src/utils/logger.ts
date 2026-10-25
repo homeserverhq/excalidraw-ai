@@ -1,10 +1,63 @@
 import winston from 'winston';
+import * as path from 'path';
+import * as fs from 'fs';
+import { homedir, tmpdir } from 'os';
 
-const LOG_FILE_PATH = process.env.LOG_FILE_PATH || 'excalidraw.log';
-const logLevel = process.env.LOG_LEVEL || 'info';
+/**
+ * Choose a platform-compatible default log path. MCP servers are launched in
+ * the caller's working directory, so a relative path would scatter log files
+ * across unrelated project and cloud-synced folders.
+ *
+ * LOG_FILE_PATH can still override this default.
+ */
+function defaultLogPath(): string {
+  if (process.platform === 'darwin') {
+    return path.join(homedir(), 'Library', 'Logs', 'excalidraw-mcp.log');
+  }
+  if (process.platform === 'win32') {
+    const base = process.env.LOCALAPPDATA || path.join(homedir(), 'AppData', 'Local');
+    return path.join(base, 'Excalidraw-MCP', 'excalidraw.log');
+  }
+  // Linux and other POSIX platforms: follow the XDG state convention.
+  const xdgState = process.env.XDG_STATE_HOME || path.join(homedir(), '.local', 'state');
+  return path.join(xdgState, 'excalidraw-mcp', 'excalidraw.log');
+}
+
+const LOG_FILE_PATH = process.env.LOG_FILE_PATH || defaultLogPath();
+
+function ensureWritableLogFile(filePath: string): string {
+  const logDir = path.dirname(filePath);
+  fs.mkdirSync(logDir, { recursive: true });
+  fs.accessSync(logDir, fs.constants.W_OK);
+  return filePath;
+}
+
+function resolveLogFilePath(): string {
+  try {
+    return ensureWritableLogFile(LOG_FILE_PATH);
+  } catch (error) {
+    if (process.env.LOG_FILE_PATH) {
+      throw error;
+    }
+  }
+
+  return ensureWritableLogFile(path.join(tmpdir(), 'excalidraw-mcp.log'));
+}
+
+const RESOLVED_LOG_FILE_PATH = resolveLogFilePath();
+
+const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
+
+// In HTTP mode stdout is not a protocol channel, so verbose console output is
+// safe (and useful in `docker logs`). In stdio mode stdout carries JSON-RPC,
+// so the console transport must only ever emit warn/error, and only to stderr;
+// info/debug stay in the log file to avoid corrupting the MCP stream.
+const HTTP_MODE = process.env.MCP_TRANSPORT === 'http';
+const CONSOLE_LEVEL = HTTP_MODE ? LOG_LEVEL : 'warn';
+const CONSOLE_STDERR_LEVELS = HTTP_MODE ? ['error', 'warn', 'info', 'debug'] : ['warn', 'error'];
 
 const logger: winston.Logger = winston.createLogger({
-  level: logLevel,
+  level: LOG_LEVEL,
 
   format: winston.format.combine(
     winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss.SSS' }),
@@ -20,12 +73,12 @@ const logger: winston.Logger = winston.createLogger({
 
   transports: [
     new winston.transports.Console({
-      level: logLevel,
-      stderrLevels: ['warn', 'error']
+      level: CONSOLE_LEVEL,
+      stderrLevels: CONSOLE_STDERR_LEVELS
     }),
 
     new winston.transports.File({
-      filename: LOG_FILE_PATH,
+      filename: RESOLVED_LOG_FILE_PATH,    // all levels to file
       level: 'debug'
     })
   ]

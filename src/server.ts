@@ -2,6 +2,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import { WebSocketServer } from 'ws';
 import { createServer } from 'http';
+import net from 'net';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
@@ -27,6 +28,26 @@ import {
 } from './types.js';
 import { z } from 'zod';
 import WebSocket from 'ws';
+import { isMainModule } from './core/entry.js';
+import { writePidFile, removePidFile } from './core/pidfile.js';
+import { renderScene, RenderError, MAX_SCALE } from './core/render/index.js';
+import {
+  CanvasFileImmutabilityError,
+  CanvasFileReferenceError,
+  CanvasPersistenceError,
+  acquireDurableStateLock,
+  commitCanvasMutation,
+  durableStatePath,
+  loadDurableState,
+  releaseDurableStateLock,
+} from './core/canvas-persistence.js';
+
+function mutationErrorStatus(error: unknown, fallback: number): number {
+  if (error instanceof CanvasPersistenceError) return 500;
+  if (error instanceof CanvasFileImmutabilityError ||
+      error instanceof CanvasFileReferenceError) return 409;
+  return fallback;
+}
 
 // Load environment variables
 dotenv.config();
@@ -74,6 +95,67 @@ function normalizeLineBreakMarkup(text: string): string {
   return text
     .replace(/<\s*b\s*r\s*\/?\s*>/gi, '\n')
     .replace(/\n{3,}/g, '\n\n');
+}
+
+function prepareFileWrites(fileList: unknown[]): ExcalidrawFile[] {
+  const durable = Boolean(durableStatePath());
+
+  // Preserve the pre-persistence endpoint exactly when durability is disabled:
+  // valid entries overwrite in request order, omitted metadata uses the same
+  // truthy defaults, and an existing file contributes no implicit defaults.
+  if (!durable) {
+    const prepared: ExcalidrawFile[] = [];
+    for (const value of fileList) {
+      if (value === null || typeof value !== 'object') continue;
+      const candidate = value as Partial<ExcalidrawFile>;
+      if (!candidate.id || !candidate.dataURL) continue;
+      prepared.push({
+        id: candidate.id,
+        dataURL: candidate.dataURL,
+        mimeType: candidate.mimeType || 'image/png',
+        created: candidate.created || Date.now(),
+      });
+    }
+    return prepared;
+  }
+
+  const prepared = new Map<string, ExcalidrawFile>();
+
+  for (const value of fileList) {
+    if (value === null || typeof value !== 'object') continue;
+    const candidate = value as Partial<ExcalidrawFile>;
+    if (typeof candidate.id !== 'string' || candidate.id.length === 0 ||
+        typeof candidate.dataURL !== 'string' || candidate.dataURL.length === 0) {
+      continue;
+    }
+
+    const previous = prepared.get(candidate.id) ?? files.get(candidate.id);
+    const mimeType = typeof candidate.mimeType === 'string' && candidate.mimeType.length > 0
+      ? candidate.mimeType
+      : previous?.mimeType ?? 'image/png';
+
+    if (previous) {
+      if (previous.dataURL !== candidate.dataURL || previous.mimeType !== mimeType) {
+        throw new CanvasFileImmutabilityError(candidate.id);
+      }
+      prepared.set(candidate.id, previous);
+      continue;
+    }
+
+    prepared.set(candidate.id, {
+      id: candidate.id,
+      dataURL: candidate.dataURL,
+      mimeType,
+      // Preserve the original in-memory endpoint's overwrite behavior:
+      // an omitted/zero timestamp is replaced with the current time. Durable
+      // retries of an existing immutable id returned above keep prior metadata.
+      created: typeof candidate.created === 'number' && Number.isFinite(candidate.created) && candidate.created > 0
+        ? candidate.created
+        : Date.now(),
+    });
+  }
+
+  return [...prepared.values()];
 }
 
 // WebSocket connection handling
@@ -130,6 +212,16 @@ const CreateElementSchema = z.object({
   }).optional(),
   fontSize: z.number().optional(),
   fontFamily: z.union([z.string(), z.number()]).optional(),
+  // Bound-text back-pointer — without it, zod strips containerId on import
+  // and re-imported bound labels detach from their containers
+  containerId: z.string().nullable().optional(),
+  // Excalidraw identity fields — preserve through import so re-exported
+  // scenes keep their stacking order, roughness seeds, and timestamps, and
+  // no-op import→export cycles stay byte-stable
+  index: z.string().nullable().optional(),
+  seed: z.number().optional(),
+  versionNonce: z.number().optional(),
+  updated: z.number().optional(),
   groupIds: z.array(z.string()).optional(),
   locked: z.boolean().optional(),
   roundness: z.object({ type: z.number(), value: z.number().optional() }).nullable().optional(),
@@ -164,7 +256,7 @@ const CreateElementSchema = z.object({
   fileId: z.string().optional(),
   status: z.string().optional(),
   scale: z.tuple([z.number(), z.number()]).optional(),
-});
+}).passthrough();
 
 const UpdateElementSchema = z.object({
   id: z.string(),
@@ -186,6 +278,16 @@ const UpdateElementSchema = z.object({
   }).optional(),
   fontSize: z.number().optional(),
   fontFamily: z.union([z.string(), z.number()]).optional(),
+  // Bound-text back-pointer — without it, zod strips containerId on import
+  // and re-imported bound labels detach from their containers
+  containerId: z.string().nullable().optional(),
+  // Excalidraw identity fields — preserve through import so re-exported
+  // scenes keep their stacking order, roughness seeds, and timestamps, and
+  // no-op import→export cycles stay byte-stable
+  index: z.string().nullable().optional(),
+  seed: z.number().optional(),
+  versionNonce: z.number().optional(),
+  updated: z.number().optional(),
   groupIds: z.array(z.string()).optional(),
   locked: z.boolean().optional(),
   roundness: z.object({ type: z.number(), value: z.number().optional() }).nullable().optional(),
@@ -222,7 +324,7 @@ const UpdateElementSchema = z.object({
   fileId: z.string().optional(),
   status: z.string().optional(),
   scale: z.tuple([z.number(), z.number()]).optional(),
-});
+}).passthrough();
 
 // API Routes
 
@@ -266,7 +368,7 @@ app.post('/api/elements', (req: Request, res: Response) => {
       resolveArrowBindings([element]);
     }
 
-    elements.set(id, element);
+    commitCanvasMutation(() => elements.set(id, element));
 
     // Broadcast to all connected clients
     const message: ElementCreatedMessage = {
@@ -281,7 +383,7 @@ app.post('/api/elements', (req: Request, res: Response) => {
     });
   } catch (error) {
     logger.error('Error creating element:', error);
-    res.status(400).json({
+    res.status(mutationErrorStatus(error, 400)).json({
       success: false,
       error: (error as Error).message
     });
@@ -292,7 +394,8 @@ app.post('/api/elements', (req: Request, res: Response) => {
 app.put('/api/elements/:id', (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const updates = UpdateElementSchema.parse({ id, ...req.body });
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const updates = UpdateElementSchema.parse({ id, ...body });
 
     if (!id) {
       return res.status(400).json({
@@ -319,8 +422,8 @@ app.put('/api/elements/:id', (req: Request, res: Response) => {
 
     // Keep Excalidraw text source in sync when clients update text via REST.
     // If originalText lags behind text, rendered wrapping/position can drift.
-    const hasTextUpdate = Object.prototype.hasOwnProperty.call(req.body, 'text');
-    const hasOriginalTextUpdate = Object.prototype.hasOwnProperty.call(req.body, 'originalText');
+    const hasTextUpdate = Object.prototype.hasOwnProperty.call(body, 'text');
+    const hasOriginalTextUpdate = Object.prototype.hasOwnProperty.call(body, 'originalText');
     if (updatedElement.type === EXCALIDRAW_ELEMENT_TYPES.TEXT && hasTextUpdate && !hasOriginalTextUpdate) {
       const incomingText = updates.text ?? '';
       const existingText = typeof existingElement.text === 'string' ? existingElement.text : '';
@@ -341,14 +444,26 @@ app.put('/api/elements/:id', (req: Request, res: Response) => {
       }
     }
 
-    elements.set(id, updatedElement);
+    // Moving/resizing a shape must drag its bound arrows along. Keep the
+    // element update and every in-place arrow reroute in one durable mutation.
+    const geometryChanged = ['x', 'y', 'width', 'height']
+      .some(key => Object.prototype.hasOwnProperty.call(body, key));
+    const reroutedArrows = commitCanvasMutation(() => {
+      elements.set(id, updatedElement);
+      return geometryChanged && updatedElement.type !== 'arrow' && updatedElement.type !== 'line'
+        ? rerouteBoundArrows(id)
+        : [];
+    });
 
-    // Broadcast to all connected clients
+    // Publish only after the complete mutation has been checkpointed.
     const message: ElementUpdatedMessage = {
       type: 'element_updated',
       element: updatedElement
     };
     broadcast(message);
+    for (const arrow of reroutedArrows) {
+      broadcast({ type: 'element_updated', element: arrow } as ElementUpdatedMessage);
+    }
 
     res.json({
       success: true,
@@ -356,7 +471,7 @@ app.put('/api/elements/:id', (req: Request, res: Response) => {
     });
   } catch (error) {
     logger.error('Error updating element:', error);
-    res.status(400).json({
+    res.status(mutationErrorStatus(error, 400)).json({
       success: false,
       error: (error as Error).message
     });
@@ -367,7 +482,7 @@ app.put('/api/elements/:id', (req: Request, res: Response) => {
 app.delete('/api/elements/clear', (req: Request, res: Response) => {
   try {
     const count = elements.size;
-    elements.clear();
+    commitCanvasMutation(() => elements.clear());
 
     broadcast({
       type: 'canvas_cleared',
@@ -383,7 +498,7 @@ app.delete('/api/elements/clear', (req: Request, res: Response) => {
     });
   } catch (error) {
     logger.error('Error clearing canvas:', error);
-    res.status(500).json({
+    res.status(mutationErrorStatus(error, 500)).json({
       success: false,
       error: (error as Error).message
     });
@@ -409,7 +524,7 @@ app.delete('/api/elements/:id', (req: Request, res: Response) => {
       });
     }
 
-    elements.delete(id);
+    commitCanvasMutation(() => elements.delete(id));
 
     // Broadcast to all connected clients
     const message: ElementDeletedMessage = {
@@ -424,7 +539,7 @@ app.delete('/api/elements/:id', (req: Request, res: Response) => {
     });
   } catch (error) {
     logger.error('Error deleting element:', error);
-    res.status(500).json({
+    res.status(mutationErrorStatus(error, 500)).json({
       success: false,
       error: (error as Error).message
     });
@@ -434,7 +549,7 @@ app.delete('/api/elements/:id', (req: Request, res: Response) => {
 // Query elements with filters
 app.get('/api/elements/search', (req: Request, res: Response) => {
   try {
-    const { type, ...filters } = req.query;
+    const { type, x_min, x_max, y_min, y_max, ...filters } = req.query;
     let results = Array.from(elements.values());
 
     // Filter by type if specified
@@ -442,7 +557,22 @@ app.get('/api/elements/search', (req: Request, res: Response) => {
       results = results.filter(element => element.type === type);
     }
 
-    // Apply additional filters
+    // Filter by bounding box if specified
+    if (x_min !== undefined || x_max !== undefined || y_min !== undefined || y_max !== undefined) {
+      const xMin = x_min !== undefined ? Number(x_min) : -Infinity;
+      const xMax = x_max !== undefined ? Number(x_max) : Infinity;
+      const yMin = y_min !== undefined ? Number(y_min) : -Infinity;
+      const yMax = y_max !== undefined ? Number(y_max) : Infinity;
+
+      results = results.filter(el =>
+        el.x >= xMin &&
+        el.x <= xMax &&
+        el.y >= yMin &&
+        el.y <= yMax
+      );
+    }
+
+    // Apply additional exact-match filters
     if (Object.keys(filters).length > 0) {
       results = results.filter(element => {
         return Object.entries(filters).every(([key, value]) => {
@@ -552,14 +682,16 @@ function computeEdgePoint(
 }
 
 // Helper: resolve arrow bindings in a batch
-function resolveArrowBindings(batchElements: ServerElement[]): void {
+function resolveArrowBindings(batchElements: ServerElement[], includeExisting = true): void {
   const elementMap = new Map<string, ServerElement>();
   batchElements.forEach(el => elementMap.set(el.id, el));
 
   // Also check existing elements for cross-batch references
-  elements.forEach((el, id) => {
-    if (!elementMap.has(id)) elementMap.set(id, el);
-  });
+  if (includeExisting) {
+    elements.forEach((el, id) => {
+      if (!elementMap.has(id)) elementMap.set(id, el);
+    });
+  }
 
   for (const el of batchElements) {
     if (el.type !== 'arrow' && el.type !== 'line') continue;
@@ -615,15 +747,40 @@ function resolveArrowBindings(batchElements: ServerElement[]): void {
   }
 }
 
+// After a shape's geometry changes, recompute every arrow bound to it so the
+// visual connection follows the shape — bindings are otherwise only resolved
+// at creation time, which left arrows floating at stale coordinates when
+// update/align/distribute moved their endpoints. Returns the re-routed arrows.
+function rerouteBoundArrows(movedId: string): ServerElement[] {
+  const rerouted: ServerElement[] = [];
+  elements.forEach(el => {
+    if (el.type !== 'arrow' && el.type !== 'line') return;
+    const startRef = (el as any).start as { id: string } | undefined;
+    const endRef = (el as any).end as { id: string } | undefined;
+    if (startRef?.id !== movedId && endRef?.id !== movedId) return;
+    resolveArrowBindings([el]);
+    el.updatedAt = new Date().toISOString();
+    el.version = (el.version || 0) + 1;
+    rerouted.push(el);
+  });
+  return rerouted;
+}
+
 // Batch create elements
 app.post('/api/elements/batch', (req: Request, res: Response) => {
   try {
-    const { elements: elementsToCreate } = req.body;
+    const { elements: elementsToCreate, replace = false } = req.body ?? {};
 
     if (!Array.isArray(elementsToCreate)) {
       return res.status(400).json({
         success: false,
         error: 'Expected an array of elements'
+      });
+    }
+    if (typeof replace !== 'boolean') {
+      return res.status(400).json({
+        success: false,
+        error: 'replace must be a boolean'
       });
     }
 
@@ -645,11 +802,24 @@ app.post('/api/elements/batch', (req: Request, res: Response) => {
       createdElements.push(element);
     });
 
-    // Resolve arrow bindings (computes positions, startBinding, endBinding, boundElements)
-    resolveArrowBindings(createdElements);
+    // Fully prepare the batch before mutating storage. Replacement imports do
+    // not resolve bindings against elements that are about to be discarded.
+    resolveArrowBindings(createdElements, !replace);
 
-    // Store all elements after binding resolution
-    createdElements.forEach(el => elements.set(el.id, el));
+    const replacedCount = replace ? elements.size : 0;
+    commitCanvasMutation(() => {
+      if (replace) elements.clear();
+      createdElements.forEach(el => elements.set(el.id, el));
+    });
+
+    // Publish only after clear + replacement have reached one checkpoint.
+    if (replace) {
+      broadcast({
+        type: 'canvas_cleared',
+        timestamp: new Date().toISOString()
+      });
+      logger.info(`Canvas replaced: ${replacedCount} existing elements removed`);
+    }
 
     // Broadcast to all connected clients
     const message: BatchCreatedMessage = {
@@ -665,7 +835,7 @@ app.post('/api/elements/batch', (req: Request, res: Response) => {
     });
   } catch (error) {
     logger.error('Error batch creating elements:', error);
-    res.status(400).json({
+    res.status(mutationErrorStatus(error, 400)).json({
       success: false,
       error: (error as Error).message
     });
@@ -716,12 +886,8 @@ app.post('/api/elements/from-mermaid', (req: Request, res: Response) => {
 // Sync elements from frontend (overwrite sync)
 app.post('/api/elements/sync', (req: Request, res: Response) => {
   try {
-    const { elements: frontendElements, timestamp } = req.body;
-
-    logger.info(`Sync request received: ${frontendElements.length} elements`, {
-      timestamp,
-      elementCount: frontendElements.length
-    });
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const { elements: frontendElements, timestamp } = body;
 
     // Validate input data
     if (!Array.isArray(frontendElements)) {
@@ -731,42 +897,43 @@ app.post('/api/elements/sync', (req: Request, res: Response) => {
       });
     }
 
+    logger.info(`Sync request received: ${frontendElements.length} elements`, {
+      timestamp,
+      elementCount: frontendElements.length
+    });
+
     // Record element count before sync
     const beforeCount = elements.size;
-
-    // 1. Clear existing memory storage
-    elements.clear();
-    logger.info(`Cleared existing elements: ${beforeCount} elements removed`);
-
-    // 2. Batch write new data
     let successCount = 0;
     const processedElements: ServerElement[] = [];
 
-    frontendElements.forEach((element: any, index: number) => {
-      try {
-        // Ensure element has ID, generate one if missing
-        const elementId = element.id || generateId();
+    commitCanvasMutation(() => {
+      elements.clear();
+      frontendElements.forEach((element: any, index: number) => {
+        try {
+          // Ensure element has ID, generate one if missing
+          const elementId = element.id || generateId();
 
-        // Add server metadata
-        const processedElement: ServerElement = {
-          ...element,
-          id: elementId,
-          syncedAt: new Date().toISOString(),
-          source: 'frontend_sync',
-          syncTimestamp: timestamp,
-          version: 1
-        };
+          // Add server metadata
+          const processedElement: ServerElement = {
+            ...element,
+            id: elementId,
+            syncedAt: new Date().toISOString(),
+            source: 'frontend_sync',
+            syncTimestamp: timestamp,
+            version: 1
+          };
 
-        // Store to memory
-        elements.set(elementId, processedElement);
-        processedElements.push(processedElement);
-        successCount++;
-
-      } catch (elementError) {
-        logger.warn(`Failed to process element ${index}:`, elementError);
-      }
+          elements.set(elementId, processedElement);
+          processedElements.push(processedElement);
+          successCount++;
+        } catch (elementError) {
+          logger.warn(`Failed to process element ${index}:`, elementError);
+        }
+      });
     });
 
+    logger.info(`Cleared existing elements: ${beforeCount} elements removed`);
     logger.info(`Sync completed: ${successCount}/${frontendElements.length} elements synced`);
 
     // 3. Broadcast sync event to all WebSocket clients
@@ -807,26 +974,46 @@ app.get('/api/files', (_req: Request, res: Response) => {
 
 // POST add/update files (batch)
 app.post('/api/files', (req: Request, res: Response) => {
-  const body = req.body;
-  const fileList: ExcalidrawFile[] = Array.isArray(body) ? body : (body?.files || []);
-  for (const f of fileList) {
-    if (f.id && f.dataURL) {
-      files.set(f.id, { id: f.id, dataURL: f.dataURL, mimeType: f.mimeType || 'image/png', created: f.created || Date.now() });
-    }
+  try {
+    const body = req.body;
+    // Keep the existing endpoint's accepted wrapper/array shapes and count
+    // behavior. Durable mode adds publication guarantees without redefining
+    // the memory-only request contract.
+    const fileList = (Array.isArray(body) ? body : (body?.files || [])) as unknown[];
+    const preparedFiles = prepareFileWrites(fileList);
+
+    commitCanvasMutation(() => {
+      preparedFiles.forEach(file => files.set(file.id, file));
+    });
+    // Broadcast only after every referenced blob and the checkpoint are durable.
+    broadcast({ type: 'files_added', files: fileList });
+    res.json({ success: true, count: fileList.length });
+  } catch (error) {
+    logger.error('Error storing canvas files:', error);
+    if (!durableStatePath()) throw error;
+    res.status(mutationErrorStatus(error, 400)).json({
+      success: false,
+      error: (error as Error).message
+    });
   }
-  // Broadcast files to connected clients
-  broadcast({ type: 'files_added', files: fileList });
-  res.json({ success: true, count: fileList.length });
 });
 
 // DELETE a file
 app.delete('/api/files/:id', (req: Request, res: Response) => {
-  const id = req.params.id as string;
-  if (files.delete(id)) {
+  try {
+    const id = req.params.id as string;
+    if (!files.has(id)) {
+      return res.status(404).json({ success: false, error: `File with ID ${id} not found` });
+    }
+    commitCanvasMutation(() => files.delete(id));
     broadcast({ type: 'file_deleted', fileId: id });
     res.json({ success: true });
-  } else {
-    res.status(404).json({ success: false, error: `File with ID ${id} not found` });
+  } catch (error) {
+    logger.error('Error deleting canvas file:', error);
+    res.status(mutationErrorStatus(error, 500)).json({
+      success: false,
+      error: (error as Error).message
+    });
   }
 });
 
@@ -840,81 +1027,124 @@ interface PendingExport {
 }
 const pendingExports = new Map<string, PendingExport>();
 
-app.post('/api/export/image', (req: Request, res: Response) => {
-  try {
-    const { format, background } = req.body;
+const exportImageSchema = z.object({
+  format: z.enum(['png', 'svg']),
+  background: z.boolean().optional(),
+  renderer: z.enum(['auto', 'node', 'browser']).optional(),
+  dark: z.boolean().optional(),
+  scale: z.number().min(1).max(MAX_SCALE).optional(),
+  padding: z.number().min(0).optional(),
+  elementIds: z.array(z.string()).min(1).optional(),
+  frameId: z.string().optional(),
+  embedScene: z.boolean().default(false),
+  embedFonts: z.boolean().optional()
+});
+type ExportImageBody = z.infer<typeof exportImageSchema>;
 
-    if (!format || !['png', 'svg'].includes(format)) {
-      return res.status(400).json({
-        success: false,
-        error: 'format must be "png" or "svg"'
-      });
-    }
+const NO_BROWSER_TAB_ERROR = 'No frontend client connected. Open the canvas in a browser first.';
 
-    if (clients.size === 0) {
-      return res.status(503).json({
-        success: false,
-        error: 'No frontend client connected. Open the canvas in a browser first.'
-      });
-    }
+// Ask the open browser tab(s) to render — Excalidraw's own exporter in a real
+// browser. Slower (re-sync + 3 s collection window) and needs a tab, but it
+// is the reference rendering, so it stays available as renderer:'browser'.
+function exportViaBrowserTab(options: ExportImageBody): Promise<{ format: string; data: string }> {
+  const { format, background, renderer: _renderer, ...rest } = options;
+  const requestId = generateId();
 
-    const requestId = generateId();
+  const exportPromise = new Promise<{ format: string; data: string }>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      const pending = pendingExports.get(requestId);
+      pendingExports.delete(requestId);
+      // If we collected any result during the window, use it
+      if (pending?.bestResult) {
+        resolve(pending.bestResult);
+      } else {
+        reject(new Error('Export timed out after 30 seconds'));
+      }
+    }, 30000);
 
-    const exportPromise = new Promise<{ format: string; data: string }>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        const pending = pendingExports.get(requestId);
-        pendingExports.delete(requestId);
-        // If we collected any result during the window, use it
-        if (pending?.bestResult) {
-          resolve(pending.bestResult);
-        } else {
-          reject(new Error('Export timed out after 30 seconds'));
-        }
-      }, 30000);
+    pendingExports.set(requestId, { resolve, reject, timeout, collectionTimeout: null, bestResult: null });
+  });
 
-      pendingExports.set(requestId, { resolve, reject, timeout, collectionTimeout: null, bestResult: null });
-    });
+  // Re-broadcast current elements so all connected clients (including stale ones)
+  // sync to the canonical server state before exporting
+  const filesObj: Record<string, ExcalidrawFile> = {};
+  files.forEach((f, id) => { filesObj[id] = f; });
+  broadcast({
+    type: 'initial_elements',
+    elements: Array.from(elements.values()),
+    ...(files.size > 0 ? { files: filesObj } : {})
+  } as InitialElementsMessage & { files?: Record<string, ExcalidrawFile> });
 
-    // Re-broadcast current elements so all connected clients (including stale ones)
-    // sync to the canonical server state before exporting
-    const filesObj: Record<string, ExcalidrawFile> = {};
-    files.forEach((f, id) => { filesObj[id] = f; });
+  // Give browsers time to process the reload before requesting export
+  setTimeout(() => {
     broadcast({
-      type: 'initial_elements',
-      elements: Array.from(elements.values()),
-      ...(files.size > 0 ? { files: filesObj } : {})
-    } as InitialElementsMessage & { files?: Record<string, ExcalidrawFile> });
-
-    // Give browsers time to process the reload before requesting export
-    setTimeout(() => {
-      broadcast({
-        type: 'export_image_request',
-        requestId,
-        format,
-        background: background ?? true
-      });
-    }, 800);
-
-    exportPromise
-      .then(result => {
-        res.json({
-          success: true,
-          format: result.format,
-          data: result.data
-        });
-      })
-      .catch(error => {
-        res.status(500).json({
-          success: false,
-          error: (error as Error).message
-        });
-      });
-  } catch (error) {
-    logger.error('Error initiating image export:', error);
-    res.status(500).json({
-      success: false,
-      error: (error as Error).message
+      type: 'export_image_request',
+      requestId,
+      format,
+      background: background ?? true,
+      options: { background, ...rest }
     });
+  }, 800);
+
+  return exportPromise;
+}
+
+app.post('/api/export/image', async (req: Request, res: Response) => {
+  const parsed = exportImageSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    const where = issue?.path.join('.');
+    return res.status(400).json({
+      success: false,
+      error: where === 'format'
+        ? 'format must be "png" or "svg"'
+        : `${where ? `${where}: ` : ''}${issue?.message ?? 'invalid request'}`
+    });
+  }
+  const options = parsed.data;
+  if (options.embedScene && options.format !== 'png') {
+    return res.status(400).json({ success: false, error: 'embedScene is only supported for PNG exports' });
+  }
+  const renderer = options.renderer ?? 'auto';
+
+  const respondBrowser = async () => {
+    if (clients.size === 0) {
+      return res.status(503).json({ success: false, error: NO_BROWSER_TAB_ERROR });
+    }
+    try {
+      const result = await exportViaBrowserTab(options);
+      res.json({ success: true, format: result.format, data: result.data, renderer: 'browser' });
+    } catch (error) {
+      res.status(500).json({ success: false, error: (error as Error).message });
+    }
+  };
+
+  if (renderer === 'browser') return respondBrowser();
+
+  try {
+    const { renderer: _renderer, ...renderOptions } = options;
+    const scene = { elements: Array.from(elements.values()), files: Object.fromEntries(files) };
+    const result = await renderScene(scene, renderOptions);
+    res.json({
+      success: true,
+      format: result.format,
+      data: result.data,
+      renderer: 'node',
+      width: result.width,
+      height: result.height,
+      ...(result.warnings.length > 0 ? { warnings: result.warnings } : {})
+    });
+  } catch (error) {
+    if (error instanceof RenderError) {
+      return res.status(error.status).json({ success: false, error: error.message });
+    }
+    logger.error('Headless image export failed:', error);
+    if (renderer === 'auto' && clients.size > 0) {
+      // The reference renderer is available; use it rather than fail
+      logger.warn('Falling back to the browser tab for this export');
+      return respondBrowser();
+    }
+    res.status(500).json({ success: false, error: (error as Error).message });
   }
 });
 
@@ -977,9 +1207,50 @@ interface PendingViewport {
 }
 const pendingViewports = new Map<string, PendingViewport>();
 
+const viewportRequestSchema = z.object({
+  scrollToContent: z.boolean().optional(),
+  scrollToElementIds: z.array(z.string().min(1)).min(1).optional(),
+  viewportZoomFactor: z.number().positive().max(1).optional(),
+  scrollToElementId: z.string().min(1).optional(),
+  zoom: z.number().min(0.1).max(10).optional(),
+  offsetX: z.number().optional(),
+  offsetY: z.number().optional()
+}).superRefine((params, ctx) => {
+  const modes = [
+    params.scrollToContent === true,
+    params.scrollToElementIds !== undefined,
+    params.scrollToElementId !== undefined,
+    params.zoom !== undefined || params.offsetX !== undefined || params.offsetY !== undefined
+  ].filter(Boolean).length;
+
+  if (modes !== 1) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Specify exactly one viewport mode: scrollToContent, scrollToElementIds, scrollToElementId, or manual zoom/offset'
+    });
+  }
+  if (params.viewportZoomFactor !== undefined &&
+      params.scrollToContent !== true &&
+      params.scrollToElementIds === undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['viewportZoomFactor'],
+      message: 'viewportZoomFactor requires scrollToContent or scrollToElementIds'
+    });
+  }
+});
+
 app.post('/api/viewport', (req: Request, res: Response) => {
   try {
-    const { scrollToContent, scrollToElementId, zoom, offsetX, offsetY } = req.body;
+    const {
+      scrollToContent,
+      scrollToElementIds,
+      scrollToElementId,
+      viewportZoomFactor,
+      zoom,
+      offsetX,
+      offsetY
+    } = viewportRequestSchema.parse(req.body);
 
     if (clients.size === 0) {
       return res.status(503).json({
@@ -1003,7 +1274,9 @@ app.post('/api/viewport', (req: Request, res: Response) => {
       type: 'set_viewport',
       requestId,
       scrollToContent,
+      scrollToElementIds,
       scrollToElementId,
+      viewportZoomFactor,
       zoom,
       offsetX,
       offsetY
@@ -1021,9 +1294,11 @@ app.post('/api/viewport', (req: Request, res: Response) => {
       });
   } catch (error) {
     logger.error('Error initiating viewport change:', error);
-    res.status(500).json({
+    res.status(error instanceof z.ZodError ? 400 : 500).json({
       success: false,
-      error: (error as Error).message
+      error: error instanceof z.ZodError
+        ? error.issues.map(issue => issue.message).join('; ')
+        : (error as Error).message
     });
   }
 });
@@ -1045,10 +1320,10 @@ app.post('/api/viewport/result', (req: Request, res: Response) => {
       return res.json({ success: true });
     }
 
-    if (error) {
+    if (error || success === false) {
       clearTimeout(pending.timeout);
       pendingViewports.delete(requestId);
-      pending.resolve({ success: false, message: error });
+      pending.reject(new Error(error || message || 'Viewport update failed'));
       return res.json({ success: true });
     }
 
@@ -1080,11 +1355,14 @@ app.post('/api/snapshots', (req: Request, res: Response) => {
 
     const snapshot: Snapshot = {
       name,
-      elements: Array.from(elements.values()),
+      // Snapshots are historical values, not aliases to live mutable elements.
+      // Bound-arrow rerouting mutates arrow objects in place. structuredClone
+      // is available across the supported Node.js >=20 runtime range.
+      elements: structuredClone(Array.from(elements.values())),
       createdAt: new Date().toISOString()
     };
 
-    snapshots.set(name, snapshot);
+    commitCanvasMutation(() => snapshots.set(name, snapshot));
     logger.info(`Snapshot saved: "${name}" with ${snapshot.elements.length} elements`);
 
     res.json({
@@ -1095,7 +1373,7 @@ app.post('/api/snapshots', (req: Request, res: Response) => {
     });
   } catch (error) {
     logger.error('Error saving snapshot:', error);
-    res.status(500).json({
+    res.status(mutationErrorStatus(error, 500)).json({
       success: false,
       error: (error as Error).message
     });
@@ -1168,7 +1446,16 @@ app.get('/health', (req: Request, res: Response) => {
     status: 'healthy',
     timestamp: new Date().toISOString(),
     elements_count: elements.size,
-    websocket_clients: clients.size
+    websocket_clients: clients.size,
+    // Image renderers available right now: headless (always, in-process) and
+    // the number of browser tabs that can render on request
+    renderers: { node: true, browser: clients.size },
+    ...(durableStatePath() ? { durable_state_enabled: true } : {}),
+    // Identity for `stop`: it must only ever signal a process that both
+    // identifies as this service AND self-reports its pid — never a pid
+    // from a stale pidfile or an unrelated app squatting on the port.
+    service: 'mcp-excalidraw-canvas',
+    pid: process.pid
   });
 });
 
@@ -1177,6 +1464,7 @@ app.get('/api/sync/status', (req: Request, res: Response) => {
   res.json({
     success: true,
     elementCount: elements.size,
+    ...(durableStatePath() ? { durableStateEnabled: true } : {}),
     timestamp: new Date().toISOString(),
     memoryUsage: {
       heapUsed: Math.round(process.memoryUsage().heapUsed / 1024 / 1024), // MB
@@ -1197,11 +1485,142 @@ app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
 
 // Start server
 const PORT = parseInt(process.env.PORT || '3000', 10);
-const HOST = process.env.HOST || 'localhost';
+const HOST = process.env.HOST || '127.0.0.1';
+const LOOPBACK_GUARD_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '0.0.0.0', '::']);
+const LOOPBACK_ADDRESSES = ['127.0.0.1', '::1'];
 
-server.listen(PORT, HOST, () => {
-  logger.info(`POC server running on http://${HOST}:${PORT}`);
-  logger.info(`WebSocket server running on ws://${HOST}:${PORT}`);
+function formatHostForUrl(host: string): string {
+  return host.includes(':') ? `[${host}]` : host;
+}
+
+function canConnect(host: string, port: number): Promise<boolean> {
+  return new Promise(resolve => {
+    let settled = false;
+    const socket = net.createConnection({ host, port });
+
+    const finish = (isOpen: boolean): void => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(isOpen);
+    };
+
+    socket.setTimeout(250);
+    socket.once('connect', () => finish(true));
+    socket.once('timeout', () => finish(false));
+    socket.once('error', () => finish(false));
+  });
+}
+
+async function findExistingLoopbackListener(port: number): Promise<string | null> {
+  for (const host of LOOPBACK_ADDRESSES) {
+    if (await canConnect(host, port)) {
+      return host;
+    }
+  }
+  return null;
+}
+
+function releaseDurableStateLockSafely(): void {
+  try {
+    releaseDurableStateLock();
+  } catch (error) {
+    logger.error('Failed to release canvas data-directory lock:', error);
+  }
+}
+
+server.on('error', (error: NodeJS.ErrnoException) => {
+  if (error.code === 'EADDRINUSE') {
+    const address = (error as NodeJS.ErrnoException & { address?: string }).address || HOST;
+    logger.error(`Canvas server port ${PORT} is already in use on ${formatHostForUrl(address)}.`);
+  } else if (error.code === 'EACCES') {
+    logger.error(`Canvas server cannot bind ${formatHostForUrl(HOST)}:${PORT}: permission denied.`);
+  } else {
+    logger.error('Failed to start canvas server:', error);
+  }
+  releaseDurableStateLockSafely();
+  process.exit(1);
 });
 
+async function startServer(): Promise<void> {
+  acquireDurableStateLock();
+  let durableState: ReturnType<typeof loadDurableState>;
+  try {
+    durableState = loadDurableState();
+  } catch (error) {
+    releaseDurableStateLockSafely();
+    throw error;
+  }
+
+  if (durableState.loaded) {
+    logger.info('Loaded durable canvas state', {
+      elements: durableState.elements,
+      files: durableState.files,
+      snapshots: durableState.snapshots
+    });
+  } else if (durableState.enabled) {
+    logger.info('Durable canvas state enabled; starting without an existing checkpoint');
+  }
+
+  if (LOOPBACK_GUARD_HOSTS.has(HOST)) {
+    const existingHost = await findExistingLoopbackListener(PORT);
+    if (existingHost) {
+      logger.error(
+        `Refusing to start canvas server on ${formatHostForUrl(HOST)}:${PORT}: ` +
+        `${formatHostForUrl(existingHost)}:${PORT} is already listening. ` +
+        'This prevents duplicate IPv4/IPv6 canvas servers from splitting state.'
+      );
+      releaseDurableStateLockSafely();
+      process.exit(1);
+    }
+  }
+
+  // The pidfile identifies the listening process for CLI lifecycle commands.
+  // The data-directory lock independently protects durable-state ownership.
+  let ownsPidFile = false;
+
+  server.listen(PORT, HOST, () => {
+    const hostForUrl = formatHostForUrl(HOST);
+    logger.info(`POC server running on http://${hostForUrl}:${PORT}`);
+    logger.info(`WebSocket server running on ws://${hostForUrl}:${PORT}`);
+
+    // Written only after listen succeeds so stale files can't shadow a
+    // server that never came up; lets `excalidraw-canvas stop` find us.
+    writePidFile(PORT, process.pid);
+    ownsPidFile = true;
+  });
+
+  const shutdown = (signal: NodeJS.Signals): void => {
+    logger.info(`Received ${signal}, shutting down canvas server`);
+    if (ownsPidFile) removePidFile(PORT);
+    server.close(() => {
+      releaseDurableStateLockSafely();
+      process.exit(0);
+    });
+    // Force-exit if open sockets keep the server from closing promptly.
+    setTimeout(() => {
+      releaseDurableStateLockSafely();
+      process.exit(0);
+    }, 2000).unref();
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('exit', () => {
+    if (ownsPidFile) removePidFile(PORT);
+    releaseDurableStateLockSafely();
+  });
+}
+
+// Start the canvas server only when this file is the process entry point
+// (`node dist/server.js`, `npm run canvas`, or spawned by the CLI/MCP
+// auto-start). Importing this module must never start the server.
+if (isMainModule(import.meta.url)) {
+  void startServer().catch(error => {
+    logger.error('Failed to start canvas server:', error);
+    releaseDurableStateLockSafely();
+    process.exit(1);
+  });
+}
+
+export { startServer };
 export default app;

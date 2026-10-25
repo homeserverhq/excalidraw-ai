@@ -1,20 +1,23 @@
-# Excalidraw MCP Server & Agent Skill
+# Excalidraw MCP Server, CLI & Agent Skill
 
 [![CI](https://github.com/yctimlin/mcp_excalidraw/actions/workflows/ci.yml/badge.svg)](https://github.com/yctimlin/mcp_excalidraw/actions/workflows/ci.yml)
 [![Docker Build & Push](https://github.com/yctimlin/mcp_excalidraw/actions/workflows/docker.yml/badge.svg)](https://github.com/yctimlin/mcp_excalidraw/actions/workflows/docker.yml)
 [![NPM Version](https://img.shields.io/npm/v/mcp-excalidraw-server)](https://www.npmjs.com/package/mcp-excalidraw-server)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Run a live Excalidraw canvas and control it from AI agents. This repo provides:
+**mcp-excalidraw-server** gives AI agents a live [Excalidraw](https://excalidraw.com) canvas they can draw on, look at, refine, and save into your repo. Your agent creates architecture diagrams and flowcharts programmatically, **sees its own work via screenshots**, fixes layout problems, and exports `.excalidraw` files you can commit next to your code.
 
-- **MCP Server**: Connect via Model Context Protocol (Claude Desktop, Cursor, Codex CLI, etc.)
-- **Agent Skill**: Portable skill for Claude Code, Codex CLI, and other skill-enabled agents
+One canvas, three ways to drive it:
 
-Keywords: Excalidraw agent skill, Excalidraw MCP server, AI diagramming, Claude Code skill, Codex CLI skill, Claude Desktop MCP, Cursor MCP, Mermaid to Excalidraw.
+- **Agent Skill + CLI** — recommended for coding agents (Claude Code, Codex CLI, Cursor, OpenCode): `npx -y mcp-excalidraw-server <command>`. Zero config, auto-starts the canvas, composable JSON in/out.
+- **MCP Server** — 26 tools over stdio for any Model Context Protocol client (Claude Desktop, Cursor, Codex CLI, Antigravity, ...). Speaks MCP `2026-07-28` (`server/discover`, per-request `_meta` envelope, tool calls without a handshake) and stays compatible with 2025-era clients that open with `initialize`.
+- **REST API** — plain HTTP for LangChain and custom frameworks.
+
+Core drawing runs locally (Node ≥ 20, MIT licensed) — no API keys or accounts. Mermaid conversion runs in the local browser canvas; `share` is optional and uploads an encrypted scene to excalidraw.com. The canvas page loads Excalidraw's fonts from the esm.sh CDN.
 
 ## Demo
 
-![MCP Excalidraw Demo](demo.gif)
+![AI agent drawing an architecture diagram on a live Excalidraw canvas via MCP](demo.gif)
 
 *AI agent creates a complete architecture diagram from a single prompt (4x speed). [Watch full video on YouTube](https://youtu.be/ufW78Amq5qA)*
 
@@ -24,8 +27,10 @@ Keywords: Excalidraw agent skill, Excalidraw MCP server, AI diagramming, Claude 
 - [What It Is](#what-it-is)
 - [How We Differ from the Official Excalidraw MCP](#how-we-differ-from-the-official-excalidraw-mcp)
 - [What's New](#whats-new)
-- [Quick Start (Local)](#quick-start-local)
-- [Quick Start (Docker)](#quick-start-docker)
+- [Installation](#installation)
+- [Agent Skill](#agent-skill)
+- [CLI Reference](#cli-reference)
+- [Headless Rendering](#headless-rendering)
 - [Configure MCP Clients](#configure-mcp-clients)
   - [Claude Desktop](#claude-desktop)
   - [Claude Code](#claude-code)
@@ -33,130 +38,284 @@ Keywords: Excalidraw agent skill, Excalidraw MCP server, AI diagramming, Claude 
   - [Codex CLI](#codex-cli)
   - [OpenCode](#opencode)
   - [Antigravity (Google)](#antigravity-google)
-- [Agent Skill (Optional)](#agent-skill-optional)
 - [MCP Tools (26 Total)](#mcp-tools-26-total)
+- [Quick Start (From Source / Docker)](#quick-start-from-source--docker)
 - [Testing](#testing)
+- [FAQ](#faq)
 - [Troubleshooting](#troubleshooting)
 - [Known Issues / TODO](#known-issues--todo)
 - [Development](#development)
+- [License](#license)
 
 ## What It Is
 
-This repo contains two separate processes:
+Ask your agent to *"draw the architecture of this service"* and it produces a real, editable Excalidraw diagram — not a one-shot image. Because the agent can query, screenshot, and update individual elements, it iterates until labels fit, nothing overlaps, and arrows route cleanly; then it exports the result as a `.excalidraw` file that lives in your repo and gets updated when the code changes.
 
-- Canvas server: web UI + REST API + WebSocket updates (default `http://localhost:3000`)
-- MCP server: exposes MCP tools over stdio; syncs to the canvas via `EXPRESS_SERVER_URL`
+Under the hood there are two processes, one product:
+
+- **Canvas server**: Excalidraw web UI + REST API + WebSocket real-time sync (default `http://127.0.0.1:3000`)
+- **A thin front-end of your choice**: the CLI, the MCP stdio server, or raw HTTP — all drive the same canvas
+
+Since v1.1 the canvas server starts itself: canvas-driving CLI commands (and the MCP server on launch) auto-spawn it if nothing is listening. `status` only inspects the current server state. Set `EXCALIDRAW_NO_AUTOSTART=1` to opt out.
 
 ## How We Differ from the Official Excalidraw MCP
 
-Excalidraw now has an [official MCP](https://github.com/excalidraw/excalidraw-mcp) — it's great for quick, prompt-to-diagram generation rendered inline in chat. We solve a different problem.
+Excalidraw has an [official MCP](https://github.com/excalidraw/excalidraw-mcp) — a chat widget that streams a diagram inline from a single prompt (the model gets two tools: a format reference and `create_view`). It's great for "draw me a cat" in Claude or ChatGPT. We solve a different problem: giving *coding agents* a persistent canvas workbench.
 
 | | Official Excalidraw MCP | This Project |
 |---|---|---|
-| **Approach** | Prompt in, diagram out (one-shot) | Programmatic element-level control (26 tools) |
-| **State** | Stateless — each call is independent | Persistent live canvas with real-time sync |
-| **Element CRUD** | No | Full create / read / update / delete per element |
-| **AI sees the canvas** | No | `describe_scene` (structured text) + `get_canvas_screenshot` (image) |
-| **Iterative refinement** | No — regenerate the whole diagram | Draw → look → adjust → look again, element by element |
-| **Layout tools** | No | `align_elements`, `distribute_elements`, `group / ungroup` |
-| **File I/O** | No | `export_scene` / `import_scene` (.excalidraw JSON) |
-| **Snapshot & rollback** | No | `snapshot_scene` / `restore_snapshot` |
-| **Mermaid conversion** | No | `create_from_mermaid` |
-| **Shareable URLs** | Yes | Yes — `export_to_excalidraw_url` |
-| **Design guide** | `read_me` cheat sheet | `read_diagram_guide` (colors, sizing, layout, anti-patterns) |
-| **Viewport control** | Camera animations | `set_viewport` (zoom-to-fit, center on element, manual zoom) |
-| **Live canvas UI** | Rendered inline in chat | Standalone Excalidraw app synced via WebSocket |
-| **Multi-agent** | Single user | Multiple agents can draw on the same canvas concurrently |
-| **Works without MCP** | No | Yes — REST API fallback via agent skill |
+| **Approach** | Prompt in, diagram out (one-shot widget) | Programmatic element-level control (CLI + 26 MCP tools) |
+| **State** | Checkpoints inside the chat widget | Live canvas with real-time sync and optional restart-safe checkpoints |
+| **Element CRUD** | Declarative re-send with delete markers | Full create / read / update / delete per element |
+| **AI sees the canvas** | No | `describe` (structured text) + `screenshot` (image) |
+| **Iterative refinement** | Regenerate from checkpoint | Draw → look → adjust → look again, element by element |
+| **Layout tools** | No | align, distribute, group / ungroup, lock, duplicate |
+| **File I/O** | No model-facing export | `.excalidraw` export/import — diagrams as repo artifacts |
+| **Snapshot & rollback** | Widget-side checkpoints | Named server-side snapshots |
+| **Mermaid conversion** | No | `mermaid` / `create_from_mermaid` |
+| **Shareable URLs** | Widget-only | `share` / `export_to_excalidraw_url` |
+| **Viewport control** | Camera animations | `set_viewport` (zoom-to-fit all or selected elements, center on one element, manual zoom) |
+| **Works without MCP** | No | Yes — CLI + agent skill + REST API |
+| **Multi-agent** | Single chat | Multiple agents on the same canvas concurrently |
 
-**TL;DR** — The official MCP generates diagrams. We give AI agents a full canvas toolkit to build, inspect, and iteratively refine diagrams — including the ability to see what they drew.
+**TL;DR** — The official MCP shows Excalidraw diagrams in your chat. This project gives your coding agent a full Excalidraw workbench: a canvas it can draw on, inspect, refine, and commit to your repo.
 
 ## What's New
 
-### v2.0 — Canvas Toolkit
+Current package version: **2.1.2**. The current release line is **v2.1 — Headless Rendering**.
 
-- 13 new MCP tools (26 total): `get_element`, `clear_canvas`, `export_scene`, `import_scene`, `export_to_image`, `duplicate_elements`, `snapshot_scene`, `restore_snapshot`, `describe_scene`, `get_canvas_screenshot`, `read_diagram_guide`, `export_to_excalidraw_url`, `set_viewport`
-- **Closed feedback loop**: AI can now inspect the canvas (`describe_scene`) and see it (`get_canvas_screenshot` returns an image) — enabling iterative refinement
-- **Design guide**: `read_diagram_guide` returns best-practice color palettes, sizing rules, layout patterns, and anti-patterns — dramatically improves AI-generated diagram quality
-- **Shareable URLs**: `export_to_excalidraw_url` encrypts and uploads the scene to excalidraw.com, returns a shareable link anyone can open
-- **Viewport control**: `set_viewport` with `scrollToContent`, `scrollToElementId`, or manual zoom/offset — agents can auto-fit diagrams after creation
-- **File I/O**: export/import full `.excalidraw` JSON files
-- **Snapshots**: save and restore named canvas states
-- **Skill fallback**: Agent skill auto-detects MCP vs REST API mode, gracefully falls back to HTTP endpoints when MCP server isn't configured
-- Fixed all previously known issues: `align_elements` / `distribute_elements` fully implemented, points type normalization, removed invalid `label` type, removed HTTP transport dead code, `ungroup_elements` now errors on failure
+### v2.1.2 — Fixes
 
-### v1.x
+- Snapshot restore no longer wipes the canvas; frames restore and import. (#101, thanks @sanjayy0612; #120)
+- One label per shape, even across updates and renames. (#121, thanks @sdrshn-nmbr)
+- Dropped images survive reload and show up in exports. (#122, thanks @appdesigngeeks)
+- Text is no longer clipped when the font loads late. (#123, #124)
 
-- Agent skill: `skills/excalidraw-skill/` (portable instructions + helper scripts for export/import and repeatable CRUD)
-- Better testing loop: MCP Inspector CLI examples + browser screenshot checks (`agent-browser`)
-- Bugfixes: batch create now preserves element ids (fixes update/delete after batch); frontend entrypoint fixed (`main.tsx`)
+### v2.1.1 — Fixes
 
-## Quick Start (Local)
+- Large exports no longer fail with `invalid order key`. (#115, thanks @fernandovmacedo)
+- Text and arrows no longer drift on each canvas sync. (#116, thanks @hidinginabunker)
+- Library installs work and persist; labels re-wrap on resize. (#113, thanks @lukemariano)
 
-Prereqs: Node >= 18, npm
+### v2.1 — Headless Rendering
 
-```bash
-npm ci
-npm run build
+- **Screenshots and image exports no longer need a browser tab.** `screenshot`, `export_to_image` and `get_canvas_screenshot` render inside the canvas server: Excalidraw's own SVG exporter runs under Node (jsdom) and resvg rasterizes to PNG with bundled Excalifont/Virgil/Cascadia/Liberation fonts. Same output as the tab, deterministic (byte-identical for an unchanged scene), a few milliseconds per render, works in CI and Docker. See [Headless Rendering](#headless-rendering).
+- **New render options** on the CLI, REST and MCP: `dark`, `scale` (1–4), `padding`, `elementIds` (render a subset), `frameId` (render one frame), `embedFonts`. `--renderer browser` keeps the old tab path.
+- **New `render` command**: `npx -y mcp-excalidraw-server render docs/arch.excalidraw --out docs/arch.png` renders a committed file offline — no canvas server at all.
+- Shapes created without `width`/`height` now default to 100×100 in exports and renders (matching the canvas) instead of collapsing to 0×0.
+- Text stored with `width: 0, height: 0` (scenes from pre-2.0 servers) is re-measured on export instead of exporting invisible. (#107)
+
+### v2.0 — Interchange-Grade Exports & MCP 2026-07-28
+
+- **Breaking: Node >= 20 required** (was 18) — the MCP TypeScript SDK v2 sets the floor. Everything else is backward compatible, including existing MCP client configs.
+- **MCP protocol revision 2026-07-28**: modern clients can call tools statelessly without an initialization handshake (`server/discover`, per-request `_meta` envelopes); legacy initialization-based clients keep working unchanged. (#98, thanks @anxkhn)
+- **Exports render everywhere now**: `.excalidraw` / `.excalidraw.md` files contain real Excalidraw elements — shape and arrow labels as bound text, live arrow bindings — so they open correctly on excalidraw.com and in the Obsidian Excalidraw plugin instead of losing labels (or being re-saved empty by the plugin). (#93, #95)
+- **Byte-stable exports**: deterministic ids, seeds, and key order — re-exporting an unchanged scene is byte-identical, so committed diagrams and vault files never produce phantom git diffs, and Obsidian block references survive re-exports.
+- **Obsidian vault fixes**: Windows/CRLF `.excalidraw.md` files import correctly (#94, thanks @cason-miles); `## Text Elements` block references now cover shape labels too.
+- **Element fields are never silently dropped**: unknown Excalidraw properties (`containerId`, `textAlign`, `originalText`, ...) pass through the server intact — fixes browser-edited text vanishing after sync. (#92, thanks @junuxyz)
+- **Mermaid conversion merges** into the existing canvas instead of replacing it, and each browser tab holds exactly one WebSocket connection (no more doubled labels). (#91)
+- **Viewport control**: `set_viewport` gains `scrollToElementIds` (multi-element zoom-to-fit) and `viewportZoomFactor`, with strict single-mode validation and real error reporting. (#86, thanks @acercyc)
+- **Dark mode**: the canvas page chrome follows the editor theme and persists it across reloads. (#89, thanks @danielsvane)
+
+### v1.1 — CLI-First
+
+- **First-class CLI**: every capability is now a composable command — `npx -y mcp-excalidraw-server add|query|describe|screenshot|export|import|mermaid|snapshot|arrange|share|...` — JSON on stdout, meaningful exit codes. Also installed as the `excalidraw-canvas` alias.
+- **Zero-setup**: canvas-driving CLI commands and the MCP server **auto-start the canvas server** if it isn't running (closes #66). Opt out with `EXCALIDRAW_NO_AUTOSTART=1`.
+- **`apply`**: multi-op patches (`{"create":[...],"update":[{"id":"a","set":{...}}],"delete":[...]}`) in a single invocation.
+- **`install-skill`**: `npx -y mcp-excalidraw-server install-skill --dir <skills-root>` copies the portable agent skill into the directory your agent chooses (project or global), cleanly replacing older versions.
+- **Skill is now CLI-first** and no longer needs a cloned repo or configured MCP server to work.
+- **Typed queries**: `query --filter locked=true --filter label.text=API` — booleans, numbers, and nested keys work.
+- **Internals**: shared core library (`src/core/`) behind both the CLI and MCP server; canvas `groupIds` are the source of truth for grouping (ungroup now works across restarts); `node-fetch` dropped; MCP version metadata derived from `package.json`; canvas server writes a pidfile and shuts down cleanly.
+
+## Installation
+
+The only prerequisite is **Node.js ≥ 20**.
+
+### Easiest: let your agent install it
+
+Copy this into your coding agent — it installs the portable skill into the project/global skill directory that agent already knows how to use, then verifies it by drawing a test diagram:
+
+```text
+Install the Excalidraw canvas toolkit so you can draw diagrams for me:
+
+1. Choose the right skill directory for this agent and scope (project or global).
+2. Run: npx -y mcp-excalidraw-server install-skill --dir <that-skills-directory>
+3. Read the installed excalidraw-skill/SKILL.md so you know the drawing workflow.
+4. Start the canvas with: npx -y mcp-excalidraw-server start
+   then tell me I can open http://127.0.0.1:3000 to watch you draw (optional).
+5. Draw a small test diagram — two labeled boxes connected by an arrow — take a
+   screenshot, and show me the result to confirm everything works.
 ```
 
-Terminal 1: start the canvas
+### Manual install
+
+| You are... | Install with | Then |
+|---|---|---|
+| **Modern coding agent** | `npx -y mcp-excalidraw-server install-skill --dir <skills-root>` | Let the agent choose project/global scope and its skill root |
+| **Claude Code shortcut** | `npx -y mcp-excalidraw-server install-skill` | Installs to `~/.claude/skills` for backward compatibility |
+| **Codex shortcut** | `npx -y mcp-excalidraw-server install-skill --target codex` | Installs to `~/.codex/skills` for backward compatibility |
+| **MCP client user** (Claude Desktop, Cursor, ...) | Add the npx config below | See [Configure MCP Clients](#configure-mcp-clients) |
+| **CLI user / scripting** | Nothing — `npx -y mcp-excalidraw-server <command>` | See [CLI Reference](#cli-reference) |
+| **Contributor / from source** | `git clone` + `npm ci` + `npm run build` | See [Quick Start (From Source / Docker)](#quick-start-from-source--docker) |
+
+There is no separate server setup: any drawing command auto-starts the local canvas server on `http://127.0.0.1:3000`.
+
+### 60-Second Quick Start (CLI)
+
+No clone, no config:
+
 ```bash
-PORT=3000 npm run canvas
+# start the canvas (drawing commands auto-start it too) and open it
+npx -y mcp-excalidraw-server start
+open http://127.0.0.1:3000   # optional: watch live (only mermaid needs the tab)
+
+# draw something
+echo '[
+  {"id":"api","type":"rectangle","x":100,"y":100,"width":160,"height":80,"text":"API Server","backgroundColor":"#a5d8ff"},
+  {"id":"db","type":"rectangle","x":400,"y":100,"width":160,"height":80,"text":"Database","backgroundColor":"#99e9f2"},
+  {"type":"arrow","x":0,"y":0,"startElementId":"api","endElementId":"db","text":"SQL"}
+]' | npx -y mcp-excalidraw-server add
+
+# let your agent see its work
+npx -y mcp-excalidraw-server describe
+npx -y mcp-excalidraw-server screenshot --out diagram.png
+
+# diagrams as repo artifacts
+mkdir -p docs
+npx -y mcp-excalidraw-server export --out docs/architecture.excalidraw
+
+# or straight into an Obsidian vault (.md extension → Obsidian Excalidraw plugin format)
+npx -y mcp-excalidraw-server export --out ~/vault/diagrams/architecture.excalidraw.md
 ```
 
-> **Security note:** The server defaults to binding on `localhost` only. If you need to expose it on a network interface (e.g. Docker, remote access), set `HOST=0.0.0.0` — but ensure you have network-level access controls in place, as the API has no built-in authentication.
+Give your agent the full playbook:
 
-Open `http://localhost:3000`.
-
-Terminal 2: run the MCP server (stdio)
 ```bash
-EXPRESS_SERVER_URL=http://localhost:3000 node dist/index.js
+npx -y mcp-excalidraw-server install-skill --dir <skills-root>
+npx -y mcp-excalidraw-server install-skill --print-source  # inspect bundled source path
 ```
 
-## Quick Start (Docker)
+> **Security note:** The canvas server binds `127.0.0.1` only by default. If you expose it on a network interface (`HOST=0.0.0.0`), put network-level access controls in front — the API has no built-in authentication.
 
-Canvas server:
+## Agent Skill
+
+The skill at `skills/excalidraw-skill/` teaches agents the full workflow — layout planning, the screenshot-verify-fix quality loop, arrow routing, anti-patterns, snapshots, and file I/O. It works through the CLI (preferred, zero setup), MCP tools (if configured), or raw REST — in that order.
+
 ```bash
-docker run -d -p 3000:3000 --name mcp-excalidraw-canvas ghcr.io/yctimlin/mcp_excalidraw-canvas:latest
+npx -y mcp-excalidraw-server install-skill --dir <skills-root>
 ```
 
-MCP server (stdio) is typically launched by your MCP client (Claude Desktop/Cursor/etc.). If you want a local container for it, use the image `ghcr.io/yctimlin/mcp_excalidraw:latest` and set `EXPRESS_SERVER_URL` to point at the canvas.
+The command copies the bundled `excalidraw-skill/` directory into `<skills-root>/excalidraw-skill`. Let your agent choose whether that root should be project-level or global. Re-running `install-skill` upgrades in place — it replaces the target directory, so files removed upstream don't linger.
+
+Where the skill shines:
+
+- **Diagrams as code artifacts**: export `.excalidraw` files into the repo, commit them, re-import + refine when the architecture changes.
+- **Obsidian vaults**: export with a `.excalidraw.md` extension and the file opens natively in the [Obsidian Excalidraw plugin](https://github.com/zsviczian/obsidian-excalidraw-plugin) — no compatibility-mode warning, block references and sync work; `import` reads both plain and lz-string-compressed vault files back.
+- **Self-verifying diagrams**: the agent screenshots its own work and fixes truncation/overlap before calling it done.
+- **No-MCP environments**: CI jobs, plain shells, and frameworks get the same capabilities through the CLI.
+
+## CLI Reference
+
+`npx -y mcp-excalidraw-server <command>` or (after `npm i -g mcp-excalidraw-server`) `excalidraw-canvas <command>`.
+
+Conventions: JSON results on stdout — except `describe` (plain text by design) and raw-content output when `--out` is omitted (`export` prints the scene JSON, `screenshot --format svg` prints SVG). Diagnostics on stderr. Exit codes: `0` ok, `1` error, `2` usage, `3` canvas unreachable, `4` browser tab required (only `mermaid` and `screenshot --renderer browser`). Canvas URL from `EXPRESS_SERVER_URL` or `--url`. Canvas-driving commands auto-start the server; `status` only reports current state. Explicit `start` overrides the `EXCALIDRAW_NO_AUTOSTART=1` opt-out (it's user intent, not auto-start).
+
+| Command | Description |
+|---------|-------------|
+| `start` / `stop` / `status` | Manage the canvas server (detached; `stop` identity-checks the live server via `/health` before signaling) |
+| `add [file\|-]` | Batch-create elements from a JSON array (file or stdin); `--one '{...}'` for a single element |
+| `apply [file\|-]` | One-call multi-op patch: `{"create":[...],"update":[{"id":"a","set":{...}}],"delete":["id"]}` |
+| `get <id>` / `delete <id...>` | Read / remove elements |
+| `update <id> --set '{...}'` | Update an element |
+| `query` | `--type`, `--bbox x0,y0,x1,y1`, `--filter k=v` (typed, nested keys), `--filter-json '{...}'` |
+| `describe` | AI-readable scene summary (plain text) |
+| `screenshot` | Render the canvas headless (no browser tab): `--out f.png\|f.svg`, `--format png\|svg`, `--scale 1-4`, `--dark`, `--padding N`, `--no-background`, `--ids a,b`, `--frame <id>`, `--no-embed-fonts`, `--embed-scene` (editable PNG); `--renderer browser` uses an open tab instead |
+| `render [file\|-]` | Render a `.excalidraw` / `.excalidraw.md` / embedded-scene PNG file to PNG/SVG offline — no canvas server, same flags as `screenshot` |
+| `export [--out f.excalidraw] [--format json\|obsidian]` / `import [file\|-] [--replace]` | Scene file I/O — a `.md` out path writes Obsidian's `.excalidraw.md` format; `import` also reads PNGs with embedded scenes |
+| `mermaid [file\|-]` | Mermaid → canvas (browser tab required) |
+| `snapshot save\|list\|restore <name>` | Named snapshots |
+| `arrange align\|distribute\|group\|ungroup\|lock\|unlock\|duplicate` | Layout ops (`--ids a,b,c`, `--to left\|horizontal\|...`) |
+| `share` | Encrypted upload → shareable excalidraw.com URL |
+| `clear --yes` | Wipe the canvas |
+| `install-skill [--dir <skills-root>]` | Install the portable agent skill |
+
+Labels and arrow bindings use the agent-friendly format everywhere in the CLI: `"text"` on any shape, `"startElementId"`/`"endElementId"` on arrows — normalization is automatic. For a native frame, add a `"type":"frame"` element with a `"name"` and set `"frameId"` on its children.
+
+## Headless Rendering
+
+Since v2.1, `screenshot`, `export_to_image` and `get_canvas_screenshot` render without a browser. Inside the canvas server, the scene is prepared with the canvas tab's own code (label sizing, wrapping and centering, defaults) and Excalidraw's own `exportToSvg` draws it under Node (a small jsdom shim supplies the DOM it expects, and text is measured with the bundled fonts' real glyph widths); [resvg](https://github.com/thx/resvg-js) rasterizes the SVG to PNG. The output is what the Excalidraw canvas draws — same SVG structure as a browser export, text within half a pixel — and it is deterministic: an unchanged scene renders to byte-identical SVG and PNG, so committed images stay diff-clean.
+
+- **Fonts**: Excalifont, Virgil, Cascadia Code and Liberation Sans ship as TTFs in `assets/fonts` (all SIL OFL 1.1; see `assets/fonts/LICENSES.md`). SVGs embed the faces they use, so they look right in browsers, GitHub and editors. Nunito, Lilita One and Comic Shanns render with the closest bundled face for now. Text in other scripts (CJK, emoji) falls back to the machine's fonts, with a warning.
+- **Options** (CLI flags / REST body / MCP params): `background`, `dark`, `scale` 1–4 (PNG), `padding`, `elementIds` or `frameId` to render a subset, `embedFonts`, `embedScene` (PNG only, default false). `EXCALIDRAW_RENDER_MAX_DIM` (default 8192) caps the PNG's largest side.
+- **`--renderer browser`** asks an open canvas tab to render instead (the pre-2.1 path). Useful for a second opinion; it is slower and the tab's unsynced edits are discarded first.
+- **Offline**: `render docs/arch.excalidraw --out docs/arch.png` needs no canvas server at all — a natural fit for CI jobs that keep images next to committed diagrams.
+- **Still browser-bound**: Mermaid conversion (`mermaid`, `create_from_mermaid`) and `set_viewport`.
+
+The renderer bundle is built by `npm run build:server` (`dist/render/excalidraw-node.mjs`); `npm run test:render` exercises it without a browser.
 
 ## Configure MCP Clients
 
-The MCP server runs over stdio and can be configured with any MCP-compatible client. Below are configurations for both **local** (requires cloning and building) and **Docker** (pull-and-run) setups.
+The MCP server runs over stdio by default (streamable HTTP is also available — see [HTTP transport](#http-transport)). Since v1.1 the simplest config is `npx` — no clone, no absolute paths, and the canvas auto-starts:
 
 ### Environment Variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `EXPRESS_SERVER_URL` | URL of the canvas server | `http://localhost:3000` |
+| `EXPRESS_SERVER_URL` | URL of the canvas server | `http://127.0.0.1:3000` |
 | `ENABLE_CANVAS_SYNC` | Enable real-time canvas sync | `true` |
-| `MCP_TRANSPORT` | Transport mode: `stdio` or `http` | `stdio` |
-| `MCP_HOST` | HTTP server host (when MCP_TRANSPORT=http) | `0.0.0.0` |
-| `MCP_PORT` | HTTP server port (when MCP_TRANSPORT=http) | `3100` |
-| `LOG_LEVEL` | Logging level: `debug`, `info`, `warn`, `error` | `info` |
-| `DEBUG` | Enable debug mode (sets LOG_LEVEL=debug) | `false` |
+| `MCP_TRANSPORT` | MCP transport: `stdio` or `http` | `stdio` |
+| `MCP_HOST` | Bind address when `MCP_TRANSPORT=http` | `0.0.0.0` |
+| `MCP_PORT` | Port when `MCP_TRANSPORT=http` | `3100` |
+| `EXCALIDRAW_NO_AUTOSTART` | Set `1` to disable canvas auto-start | (unset) |
+| `EXCALIDRAW_EXPORT_DIR` | Base directory MCP file exports may write to | current working dir |
+| `EXCALIDRAW_RENDER_MAX_DIM` | Largest side of a headless PNG, in pixels | `8192` |
+| `EXCALIDRAW_DATA_DIR` | Optional local durable-state directory | (unset; in-memory) |
+| `EXCALIDRAW_SHARE_UPLOAD_URL` | Where `share` uploads the encrypted scene (an excalidraw-json `POST` endpoint) | `https://json.excalidraw.com/api/v2/post/` |
+| `EXCALIDRAW_SHARE_BASE_URL` | Excalidraw app that share links open in | `https://excalidraw.com` |
+| `PORT` / `HOST` | Canvas server bind address | `3000` / `127.0.0.1` |
+| `LOG_LEVEL` | Log verbosity (`error`, `warn`, `info`, `debug`) | `info` |
+| `LOG_FILE_PATH` | Log file location | `~/Library/Logs/excalidraw-mcp.log` (macOS), `$XDG_STATE_HOME/excalidraw-mcp/excalidraw.log` (Linux), `%LOCALAPPDATA%\Excalidraw-MCP\excalidraw.log` (Windows) |
 
-### Using HTTP Transport
+#### HTTP transport
 
-By default, the MCP server uses stdio transport (for Claude Desktop, etc.). To enable HTTP transport for external clients like OpenWebUI:
+By default the MCP server uses stdio (Claude Desktop, Cursor, etc.). Set `MCP_TRANSPORT=http` to serve the same tools over the streamable HTTP transport — useful for web clients such as Open WebUI, or when running the server in a container:
 
 ```bash
-# Set environment variable
-MCP_TRANSPORT=http
+MCP_TRANSPORT=http MCP_PORT=3100 node dist/index.js
 ```
 
-The server will listen on `http://0.0.0.0:3100` with endpoints:
-- `POST /mcp` - JSON-RPC over HTTP
-- `GET /mcp` - Server-Sent Events for responses
-- `GET /health` - Health check
+The server listens on `http://0.0.0.0:3100` (override with `MCP_HOST` / `MCP_PORT`) and exposes:
 
-**Docker with HTTP transport:**
+- `POST /mcp` — JSON-RPC requests
+- `GET /mcp` — server-to-client SSE stream (modern protocol)
+- `GET /health` — health check
+
+Docker:
+
 ```bash
 docker run -p 3100:3100 -e MCP_TRANSPORT=http mcp-excalidraw
 ```
+
+In HTTP mode, `info`/`debug` logs are written to stderr (visible in `docker logs`); in stdio mode stdout is reserved for JSON-RPC, so only `warn`/`error` reach stderr and everything else goes to the log file.
+
+#### Durable canvas state
+
+Set `EXCALIDRAW_DATA_DIR` to recover elements, server-known image files, and named snapshots after a canvas-server restart. From a source checkout after `npm run build`:
+
+```bash
+EXCALIDRAW_DATA_DIR=/absolute/private/canvas-data \
+  node dist/bin.js start
+```
+
+When the variable is unset, behavior and API semantics remain in-memory and no durable-state directory is created. When enabled, the directory contains a versioned `canvas-state-v1.json` checkpoint, a `blobs/` directory, and a runtime `canvas-state.lock/` ownership directory. Image payloads are stored once as immutable file-id blobs at a path-safe SHA-256 of each file ID; checkpoints record a separate content SHA-256 and contain references only. A new blob is flushed and atomically published before any checkpoint is allowed to reference it. Each accepted mutation flushes a temporary checkpoint and atomically renames it before the server broadcasts or acknowledges the mutation. Serialization recursively sorts object keys, preserves scene stacking order, and stores file and named-snapshot metadata in stable ID/name order. Invalid JSON, unsupported schemas, non-regular checkpoint paths, missing blobs, and blob-integrity failures stop startup rather than replacing recoverable state with an empty scene.
+
+Two REST rules are stricter in durable mode, and both return `409`: upload an image's file (`POST /api/files`) before the element that references it, and never re-upload a file ID with different content. The canvas tab and `import` already work this way.
+
+If the checkpoint has already been renamed into place but the final directory flush fails, the request fails without a success broadcast and further mutations are refused until restart. The published scene stays in memory so it agrees with the file on disk; the failed request may appear in the recovered scene. On Windows, Node.js does not provide directory fsync, so the store flushes file contents and uses atomic publication without claiming the same directory durability barrier.
+
+The data-directory lock grants one process exclusive ownership of that durable state, including when servers use different ports. It stores one token-specific owner file so stale-lock reclamation cannot delete a newer owner's evidence. The existing pidfile has a separate job: it identifies a listening process for `start` / `stop` lifecycle commands. Local filesystems and one writer are supported; network filesystems, shared multi-writer access, automatic blob garbage collection, databases, and cloud persistence are out of scope.
+
+> **Privacy:** durable state contains the diagram and embedded image payloads. Keep the directory outside repositories and shared folders, restrict its permissions, and mount it as a private writable volume when using containers.
 
 ---
 
@@ -167,6 +326,18 @@ Config location:
 - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
 - Linux: `~/.config/Claude/claude_desktop_config.json`
 
+**npx (recommended)**
+```json
+{
+  "mcpServers": {
+    "excalidraw": {
+      "command": "npx",
+      "args": ["-y", "mcp-excalidraw-server"]
+    }
+  }
+}
+```
+
 **Local (node)**
 ```json
 {
@@ -175,7 +346,7 @@ Config location:
       "command": "node",
       "args": ["/absolute/path/to/mcp_excalidraw/dist/index.js"],
       "env": {
-        "EXPRESS_SERVER_URL": "http://localhost:3000",
+        "EXPRESS_SERVER_URL": "http://127.0.0.1:3000",
         "ENABLE_CANVAS_SYNC": "true"
       }
     }
@@ -204,20 +375,17 @@ Config location:
 
 ### Claude Code
 
-Use the `claude mcp add` command to register the MCP server.
+**npx (recommended)**
+```bash
+claude mcp add excalidraw --scope user -- npx -y mcp-excalidraw-server
+```
+
+> Tip: for coding agents, the skill + CLI often beats MCP config entirely — let the agent pick its skill root, then run `npx -y mcp-excalidraw-server install-skill --dir <skills-root>`.
 
 **Local (node)** - User-level (available across all projects):
 ```bash
 claude mcp add excalidraw --scope user \
-  -e EXPRESS_SERVER_URL=http://localhost:3000 \
-  -e ENABLE_CANVAS_SYNC=true \
-  -- node /absolute/path/to/mcp_excalidraw/dist/index.js
-```
-
-**Local (node)** - Project-level (shared via `.mcp.json`):
-```bash
-claude mcp add excalidraw --scope project \
-  -e EXPRESS_SERVER_URL=http://localhost:3000 \
+  -e EXPRESS_SERVER_URL=http://127.0.0.1:3000 \
   -e ENABLE_CANVAS_SYNC=true \
   -- node /absolute/path/to/mcp_excalidraw/dist/index.js
 ```
@@ -243,17 +411,13 @@ claude mcp remove excalidraw # Remove a server
 
 Config location: `.cursor/mcp.json` in your project root (or `~/.cursor/mcp.json` for global config)
 
-**Local (node)**
+**npx (recommended)**
 ```json
 {
   "mcpServers": {
     "excalidraw": {
-      "command": "node",
-      "args": ["/absolute/path/to/mcp_excalidraw/dist/index.js"],
-      "env": {
-        "EXPRESS_SERVER_URL": "http://localhost:3000",
-        "ENABLE_CANVAS_SYNC": "true"
-      }
+      "command": "npx",
+      "args": ["-y", "mcp-excalidraw-server"]
     }
   }
 }
@@ -280,14 +444,9 @@ Config location: `.cursor/mcp.json` in your project root (or `~/.cursor/mcp.json
 
 ### Codex CLI
 
-Use the `codex mcp add` command to register the MCP server.
-
-**Local (node)**
+**npx (recommended)**
 ```bash
-codex mcp add excalidraw \
-  --env EXPRESS_SERVER_URL=http://localhost:3000 \
-  --env ENABLE_CANVAS_SYNC=true \
-  -- node /absolute/path/to/mcp_excalidraw/dist/index.js
+codex mcp add excalidraw -- npx -y mcp-excalidraw-server
 ```
 
 **Docker**
@@ -311,32 +470,13 @@ codex mcp remove excalidraw # Remove a server
 
 Config location: `~/.config/opencode/opencode.json` or project-level `opencode.json`
 
-**Local (node)**
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
     "excalidraw": {
       "type": "local",
-      "command": ["node", "/absolute/path/to/mcp_excalidraw/dist/index.js"],
-      "enabled": true,
-      "environment": {
-        "EXPRESS_SERVER_URL": "http://localhost:3000",
-        "ENABLE_CANVAS_SYNC": "true"
-      }
-    }
-  }
-}
-```
-
-**Docker**
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "excalidraw": {
-      "type": "local",
-      "command": ["docker", "run", "-i", "--rm", "-e", "EXPRESS_SERVER_URL=http://host.docker.internal:3000", "-e", "ENABLE_CANVAS_SYNC=true", "ghcr.io/yctimlin/mcp_excalidraw:latest"],
+      "command": ["npx", "-y", "mcp-excalidraw-server"],
       "enabled": true
     }
   }
@@ -349,34 +489,12 @@ Config location: `~/.config/opencode/opencode.json` or project-level `opencode.j
 
 Config location: `~/.gemini/antigravity/mcp_config.json`
 
-**Local (node)**
 ```json
 {
   "mcpServers": {
     "excalidraw": {
-      "command": "node",
-      "args": ["/absolute/path/to/mcp_excalidraw/dist/index.js"],
-      "env": {
-        "EXPRESS_SERVER_URL": "http://localhost:3000",
-        "ENABLE_CANVAS_SYNC": "true"
-      }
-    }
-  }
-}
-```
-
-**Docker**
-```json
-{
-  "mcpServers": {
-    "excalidraw": {
-      "command": "docker",
-      "args": [
-        "run", "-i", "--rm",
-        "-e", "EXPRESS_SERVER_URL=http://host.docker.internal:3000",
-        "-e", "ENABLE_CANVAS_SYNC=true",
-        "ghcr.io/yctimlin/mcp_excalidraw:latest"
-      ]
+      "command": "npx",
+      "args": ["-y", "mcp-excalidraw-server"]
     }
   }
 }
@@ -386,66 +504,8 @@ Config location: `~/.gemini/antigravity/mcp_config.json`
 
 ### Notes
 
-- **Docker networking**: Use `host.docker.internal` to reach the canvas server running on your host machine. On Linux, you may need `--add-host=host.docker.internal:host-gateway` or use `172.17.0.1`.
-- **Canvas server**: Must be running before the MCP server connects. Start it with `npm run canvas` (local) or `docker run -d -p 3000:3000 ghcr.io/yctimlin/mcp_excalidraw-canvas:latest` (Docker).
-- **Absolute paths**: When using local node setup, replace `/absolute/path/to/mcp_excalidraw` with the actual path where you cloned and built the repo.
-- **In-memory storage**: The canvas server stores elements in memory. Restarting the server will clear all elements. Use the export/import scripts if you need persistence.
-
-## Agent Skill (Optional)
-
-This repo includes a skill at `skills/excalidraw-skill/` that provides:
-
-- **Workflow playbook** (`SKILL.md`): step-by-step guidance for drawing, refining, and exporting diagrams
-- **Cheatsheet** (`references/cheatsheet.md`): MCP tool and REST API reference
-- **Helper scripts** (`scripts/*.cjs`): export, import, clear, healthcheck, CRUD operations
-
-The skill complements the MCP server by giving your AI agent structured workflows to follow.
-
-### Install The Skill (Codex CLI example)
-
-```bash
-mkdir -p ~/.codex/skills
-cp -R skills/excalidraw-skill ~/.codex/skills/excalidraw-skill
-```
-
-To update an existing installation, remove the old folder first (`rm -rf ~/.codex/skills/excalidraw-skill`) then re-copy.
-
-### Install The Skill (Claude Code)
-
-**User-level** (available across all your projects):
-```bash
-mkdir -p ~/.claude/skills
-cp -R skills/excalidraw-skill ~/.claude/skills/excalidraw-skill
-```
-
-**Project-level** (scoped to a specific project, can be committed to the repo):
-```bash
-mkdir -p /path/to/your/project/.claude/skills
-cp -R skills/excalidraw-skill /path/to/your/project/.claude/skills/excalidraw-skill
-```
-
-Then invoke the skill in Claude Code with `/excalidraw-skill`.
-
-To update an existing installation, remove the old folder first then re-copy.
-
-### Use The Skill Scripts
-
-All scripts respect `EXPRESS_SERVER_URL` (default `http://localhost:3000`) or accept `--url`.
-
-```bash
-EXPRESS_SERVER_URL=http://127.0.0.1:3000 node skills/excalidraw-skill/scripts/healthcheck.cjs
-EXPRESS_SERVER_URL=http://127.0.0.1:3000 node skills/excalidraw-skill/scripts/export-elements.cjs --out diagram.elements.json
-EXPRESS_SERVER_URL=http://127.0.0.1:3000 node skills/excalidraw-skill/scripts/import-elements.cjs --in diagram.elements.json --mode batch
-```
-
-### When The Skill Is Useful
-
-- Repository workflow: export elements as JSON, commit it, and re-import later.
-- Reliable refactors: clear + re-import in `sync` mode to make canvas match a file.
-- Automated smoke tests: create/update/delete a known element to validate a deployment.
-- Repeatable diagrams: keep a library of element JSON snippets and import them.
-
-See `skills/excalidraw-skill/SKILL.md` and `skills/excalidraw-skill/references/cheatsheet.md`.
+- **Docker networking**: Use `host.docker.internal` to reach the canvas server running on your host machine. On Linux, you may need `--add-host=host.docker.internal:host-gateway` or use `172.17.0.1`. The Docker MCP image sets `EXCALIDRAW_NO_AUTOSTART=1` (it has no frontend build) — run the canvas as its own container.
+- **Canvas persistence**: By default, elements and named snapshots are held in memory and are lost on server restart. Set `EXCALIDRAW_DATA_DIR` for restart recovery of elements, server-known image files, and named snapshots (see [Durable canvas state](#durable-canvas-state)). Use `export` to save a standalone `.excalidraw` file; taking a snapshot alone does not provide restart recovery in the default in-memory mode.
 
 ## MCP Tools (26 Total)
 
@@ -462,12 +522,88 @@ See `skills/excalidraw-skill/SKILL.md` and `skills/excalidraw-skill/references/c
 
 Full schemas are discoverable via `tools/list` or in `skills/excalidraw-skill/references/cheatsheet.md`.
 
+Viewport group focus can tune framing with `viewportZoomFactor`:
+
+```json
+{
+  "scrollToElementIds": ["id1", "id2", "id3"],
+  "viewportZoomFactor": 0.85
+}
+```
+
+`scrollToElementIds` zooms to fit every requested element, while `scrollToElementId` centers one element without changing the current zoom. Specify only one viewport mode per request. `viewportZoomFactor` accepts values greater than 0 and at most 1.
+
+## Quick Start (From Source / Docker)
+
+From source (Node >= 20):
+
+```bash
+npm ci
+npm run build
+PORT=3000 npm run canvas          # canvas server (terminal 1)
+node dist/index.js                # MCP server over stdio (terminal 2, usually launched by your MCP client)
+node dist/bin.js status           # or drive the CLI straight from the build
+```
+
+Docker canvas server:
+```bash
+docker run -d -p 3000:3000 --name mcp-excalidraw-canvas ghcr.io/yctimlin/mcp_excalidraw-canvas:latest
+```
+
+MCP server image: `ghcr.io/yctimlin/mcp_excalidraw:latest` (stdio by default; set `MCP_TRANSPORT=http` and publish port `3100` for HTTP, and point `EXPRESS_SERVER_URL` at the canvas container).
+
 ## Testing
+
+### CLI Smoke Test
+
+```bash
+npx -y mcp-excalidraw-server start
+npx -y mcp-excalidraw-server status
+npx -y mcp-excalidraw-server add --one '{"type":"rectangle","x":100,"y":100,"width":300,"height":200}'
+npx -y mcp-excalidraw-server describe
+```
 
 ### Canvas Smoke Test (HTTP)
 
 ```bash
-curl http://localhost:3000/health
+curl http://127.0.0.1:3000/health
+```
+
+### Regression Checks
+
+`npm test` builds the server and runs four suites, each also available on its own:
+
+```bash
+npm test
+npm run test:mcp      # MCP stdio wire protocol (see below)
+npm run test:bind     # default loopback bind, duplicate-start refusal
+npm run test:render   # headless renderer, export order keys, scene-prep stability
+npm run test:state    # atomic import and snapshot restore, sync validation
+```
+
+### Canvas Browser Regression Tests
+
+These Chromium tests build the app and start an isolated localhost server. They
+cover frame reload/reconnect, mixed scenes, failed-load sync protection, stale
+responses, clearing/deletion, Mermaid imports, SVG export, dropped images, and
+text measurement after fonts load. They refuse to reuse an existing server; set
+`CANVAS_TEST_PORT` if port 51910 is occupied.
+
+```bash
+npx playwright install chromium
+npm run type-check:frontend
+npm run test:canvas
+```
+
+### MCP Stdio Wire Test
+
+Drives `dist/index.js` with raw JSON-RPC frames and checks both protocol eras:
+`server/discover`, tool calls sent without any handshake, refusal of unsupported
+protocol revisions and malformed `_meta` envelopes, and the legacy `initialize`
+path.
+
+```bash
+npm run test:mcp
 ```
 
 ### MCP Smoke Test (MCP Inspector)
@@ -475,7 +611,7 @@ curl http://localhost:3000/health
 List tools:
 ```bash
 npx @modelcontextprotocol/inspector --cli \
-  -e EXPRESS_SERVER_URL=http://localhost:3000 \
+  -e EXPRESS_SERVER_URL=http://127.0.0.1:3000 \
   -e ENABLE_CANVAS_SYNC=true -- \
   node dist/index.js --method tools/list
 ```
@@ -483,7 +619,7 @@ npx @modelcontextprotocol/inspector --cli \
 Create a rectangle:
 ```bash
 npx @modelcontextprotocol/inspector --cli \
-  -e EXPRESS_SERVER_URL=http://localhost:3000 \
+  -e EXPRESS_SERVER_URL=http://127.0.0.1:3000 \
   -e ENABLE_CANVAS_SYNC=true -- \
   node dist/index.js --method tools/call --tool-name create_element \
   --tool-arg type=rectangle --tool-arg x=100 --tool-arg y=100 \
@@ -500,17 +636,66 @@ agent-browser wait --load networkidle
 agent-browser screenshot /tmp/canvas.png
 ```
 
+## FAQ
+
+### How is this different from the official Excalidraw MCP?
+
+The [official Excalidraw MCP](https://github.com/excalidraw/excalidraw-mcp) is a chat widget: you prompt, it streams a diagram into the conversation (the model gets two tools). This project is a **workbench for coding agents**: a persistent local canvas with element-level create/read/update/delete, layout tools, screenshots the model can see, snapshots, and `.excalidraw` file I/O — driveable via CLI, MCP, or REST. See the [full comparison table](#how-we-differ-from-the-official-excalidraw-mcp).
+
+### Which AI tools does it work with?
+
+Claude Code, Claude Desktop, Cursor, Codex CLI, OpenCode, and Google Antigravity are documented below — but any agent that can run shell commands can use the CLI, any MCP client can use the MCP server, and anything else (LangChain, custom apps) can use the REST API.
+
+### Can the AI actually see the diagram it drew?
+
+Yes — that's the core feature. `describe` returns a structured text summary (ids, positions, labels, connections) and `screenshot` returns a rendered PNG. Agents use both to catch truncated labels, overlaps, and bad arrow routing, then fix them element by element.
+
+### Do I need a browser open?
+
+No. Screenshots and PNG/SVG exports render headless inside the canvas server (see [Headless Rendering](#headless-rendering)), and everything else — creating, querying, updating elements, `.excalidraw` files — never needed one. Only two things still need an open tab: Mermaid conversion (it lays out in the browser) and viewport control (it moves a camera). The CLI exits with code `4` and tells you when that is the case. Opening the URL is still the way for a human to watch the agent draw.
+
+### Are my diagrams persistent?
+
+By default the canvas is in-memory (restart = blank canvas). Set `EXCALIDRAW_DATA_DIR` for automatic local restart recovery of elements, server-known image files, and named snapshots. Portable, reviewable artifacts should still be exported as `.excalidraw` files and committed to your repo when appropriate.
+
+### Are excalidraw.com share links private?
+
+`share` encrypts the scene locally with AES-GCM before uploading; the decryption key is only in the URL fragment, which excalidraw.com's server never sees. Anyone you give the full link to can view the diagram.
+
+### Can share links point at a self-hosted Excalidraw?
+
+Yes. Set `EXCALIDRAW_SHARE_UPLOAD_URL` to your storage backend's scene endpoint and `EXCALIDRAW_SHARE_BASE_URL` to your Excalidraw app. Any backend that speaks the excalidraw-json API works, for example [alswl/excalidraw-storage-backend](https://github.com/alswl/excalidraw-storage-backend), whose endpoint is `<storage>/api/v2/scenes/`:
+
+```bash
+EXCALIDRAW_SHARE_UPLOAD_URL=https://draw.example.com/api/v2/scenes/ \
+EXCALIDRAW_SHARE_BASE_URL=https://draw.example.com \
+  npx -y mcp-excalidraw-server share
+```
+
+Your app must load `#json=` links from that same backend (for the alswl fork: `VITE_APP_BACKEND_V2_GET_URL`).
+
+### Does it need an API key or cloud service?
+
+No API key is required. Core drawing runs locally under MIT license. Outbound traffic is limited to the canvas page loading Excalidraw's fonts from the esm.sh CDN and the optional `share` upload to excalidraw.com (or your own instance, see above). The CLI, MCP server and headless renderer make no other network calls.
+
+### Can I use it without configuring MCP?
+
+Yes — that's the recommended path for coding agents: `npx -y mcp-excalidraw-server install-skill --dir <skills-root>` and the agent drives everything through the CLI. MCP configuration is only needed for chat clients like Claude Desktop.
+
 ## Troubleshooting
 
-- Canvas not updating: confirm `EXPRESS_SERVER_URL` points at the running canvas server.
-- Updates/deletes fail after batch creation: ensure you are on a build that includes the batch id preservation fix (merged via PR #34).
+- **CLI exit code 3** (canvas unreachable): the server is not running for an inspecting command such as `status`, auto-start is disabled (`EXCALIDRAW_NO_AUTOSTART=1`), or `EXPRESS_SERVER_URL` points at a non-loopback host. Run `start` explicitly or fix the env.
+- **CLI exit code 4** (browser required): only `mermaid` and `screenshot --renderer browser` need an open tab — open `http://127.0.0.1:3000` in a browser and retry, or drop `--renderer browser` to render headless.
+- **Headless PNG shows boxes instead of CJK/emoji text**: the bundled fonts cover Latin scripts; for other scripts resvg falls back to the machine's fonts (a warning is printed). Install a CJK font on the machine running the canvas server.
+- **Canvas not updating**: confirm `EXPRESS_SERVER_URL` points at the running canvas server (`status` shows the URL in use).
+- **Canvas page shows plain fonts offline**: the page loads Excalidraw's hand-drawn fonts from the esm.sh CDN, so without internet access it falls back to system fonts. Headless screenshots and `render` use the bundled fonts and are unaffected.
+- **Something else looks wrong**: the server log has the details; its location is in [Environment Variables](#environment-variables) (`LOG_FILE_PATH`).
 
 ## Known Issues / TODO
 
-All previously listed bugs have been fixed in v2.0. Remaining items:
-
-- [ ] **Persistent storage**: Elements are stored in-memory — restarting the server clears everything. Use `export_scene` / snapshots as a workaround.
-- [ ] **Image export requires a browser**: `export_to_image` and `get_canvas_screenshot` rely on the frontend doing the actual rendering. The canvas UI must be open in a browser.
+- [x] **Optional persistent storage**: set `EXCALIDRAW_DATA_DIR` for atomic local restart recovery; the default remains in-memory.
+- [ ] **Mermaid conversion requires a browser**: `mermaid` / `create_from_mermaid` lay out the diagram in the frontend. Image export and screenshots are headless since v2.1.
+- [ ] **Canvas page fonts come from a CDN**: serving them from the canvas server would make the page work fully offline.
 
 Contributions welcome!
 
@@ -519,4 +704,16 @@ Contributions welcome!
 ```bash
 npm run type-check
 npm run build
+npm run cli -- status      # run the CLI from the local build
+npm run sync:skills        # after editing skills/excalidraw-skill, sync the repo-local agent copy
 ```
+
+Bug reports and pull requests are welcome on [GitHub issues](https://github.com/yctimlin/mcp_excalidraw/issues). If this project helps you, a ⭐ helps others find it.
+
+## License
+
+[MIT](LICENSE) © [yctimlin](https://github.com/yctimlin) — not affiliated with the Excalidraw team. [Excalidraw](https://github.com/excalidraw/excalidraw) is its own MIT-licensed project; this toolkit builds on it with love.
+
+**Links:** [npm package](https://www.npmjs.com/package/mcp-excalidraw-server) · [GitHub](https://github.com/yctimlin/mcp_excalidraw) · [Issues](https://github.com/yctimlin/mcp_excalidraw/issues) · [Demo video](https://youtu.be/ufW78Amq5qA)
+
+If you're interested in what comes next, follow me on X: [@ycalintim](https://x.com/ycalintim).
