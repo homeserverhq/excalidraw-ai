@@ -1,7 +1,7 @@
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import logger from '../utils/logger.js';
-import { EXPRESS_SERVER_URL, ENABLE_CANVAS_SYNC, EXCALIDRAW_NO_AUTOSTART } from './config.js';
+import { EXPRESS_SERVER_URL, EXCALIDRAW_PUBLIC_URL, ENABLE_CANVAS_SYNC, EXCALIDRAW_NO_AUTOSTART } from './config.js';
 import { getHealth, CANVAS_SERVICE_NAME, foreignServiceError, markCanvasIdentityVerified } from './canvas-client.js';
 
 export { foreignServiceError };
@@ -119,7 +119,7 @@ export async function ensureCanvasRunning(options: { timeoutMs?: number; force?:
     if (isCanvasHealth(await healthOrNull(400))) {
       markCanvasIdentityVerified();
       process.stderr.write(
-        `Canvas server running at ${EXPRESS_SERVER_URL} — screenshots render headless; open it in a browser to watch or for mermaid conversion.\n`
+        `Canvas server running at ${EXCALIDRAW_PUBLIC_URL} — screenshots render headless; open it in a browser to watch or for mermaid conversion.\n`
       );
       return { url: EXPRESS_SERVER_URL, spawned: true };
     }

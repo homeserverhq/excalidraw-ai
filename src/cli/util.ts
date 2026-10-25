@@ -1,7 +1,7 @@
 import fs from 'fs';
 import { CliUsageError, readStdin } from './args.js';
 import { getHealth } from '../core/canvas-client.js';
-import { EXPRESS_SERVER_URL } from '../core/config.js';
+import { EXCALIDRAW_PUBLIC_URL } from '../core/config.js';
 
 // Results go to stdout as JSON; diagnostics belong on stderr.
 export function printJson(value: unknown): void {
@@ -18,7 +18,7 @@ export async function requireBrowserClient(what: string): Promise<void> {
   const health = await getHealth();
   if (health.websocket_clients === 0) {
     const error = new Error(
-      `${what} requires the canvas to be open in a browser. Open ${EXPRESS_SERVER_URL} and retry.`
+      `${what} requires the canvas to be open in a browser. Open ${EXCALIDRAW_PUBLIC_URL} and retry.`
     );
     (error as any).code = 'BROWSER_REQUIRED';
     throw error;

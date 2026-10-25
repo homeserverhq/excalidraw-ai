@@ -261,11 +261,13 @@ The MCP server runs over stdio by default (streamable HTTP is also available —
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `EXPRESS_SERVER_URL` | URL of the canvas server | `http://127.0.0.1:3000` |
+| `EXPRESS_SERVER_URL` | URL of the canvas server (used for API calls and auto-start) | `http://127.0.0.1:3000` |
+| `EXCALIDRAW_PUBLIC_URL` | Public URL of the canvas UI used in user-facing hints; display-only | `EXPRESS_SERVER_URL` |
 | `ENABLE_CANVAS_SYNC` | Enable real-time canvas sync | `true` |
 | `MCP_TRANSPORT` | MCP transport: `stdio` or `http` | `stdio` |
 | `MCP_HOST` | Bind address when `MCP_TRANSPORT=http` | `0.0.0.0` |
 | `MCP_PORT` | Port when `MCP_TRANSPORT=http` | `3100` |
+| `DISABLED_TOOLS` | Comma-separated MCP tool names to hide from `tools/list` and `server/discover` | (unset; all tools) |
 | `EXCALIDRAW_NO_AUTOSTART` | Set `1` to disable canvas auto-start | (unset) |
 | `EXCALIDRAW_EXPORT_DIR` | Base directory MCP file exports may write to | current working dir |
 | `EXCALIDRAW_RENDER_MAX_DIM` | Largest side of a headless PNG, in pixels | `8192` |
@@ -275,6 +277,8 @@ The MCP server runs over stdio by default (streamable HTTP is also available —
 | `PORT` / `HOST` | Canvas server bind address | `3000` / `127.0.0.1` |
 | `LOG_LEVEL` | Log verbosity (`error`, `warn`, `info`, `debug`) | `info` |
 | `LOG_FILE_PATH` | Log file location | `~/Library/Logs/excalidraw-mcp.log` (macOS), `$XDG_STATE_HOME/excalidraw-mcp/excalidraw.log` (Linux), `%LOCALAPPDATA%\Excalidraw-MCP\excalidraw.log` (Windows) |
+
+`EXCALIDRAW_PUBLIC_URL` only changes the URL shown in human-facing hints (for example, the Mermaid conversion note). API calls and auto-start always use `EXPRESS_SERVER_URL`, so behind a reverse proxy set `EXPRESS_SERVER_URL` to the internal address and `EXCALIDRAW_PUBLIC_URL` to the public HTTPS URL.
 
 #### HTTP transport
 
@@ -521,6 +525,14 @@ Config location: `~/.gemini/antigravity/mcp_config.json`
 | **Resources** | `get_resource` |
 
 Full schemas are discoverable via `tools/list` or in `skills/excalidraw-skill/references/cheatsheet.md`.
+
+To hide a tool from `tools/list` and `server/discover` (for example to avoid sending large image payloads to the model), set a comma-separated list of tool names:
+
+```bash
+DISABLED_TOOLS=get_canvas_screenshot
+```
+
+Disabled tools are also refused if called directly. Unset or empty keeps every tool. The CLI `screenshot` command and the canvas REST render endpoints are unaffected.
 
 Viewport group focus can tune framing with `viewportZoomFactor`:
 

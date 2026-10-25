@@ -2,7 +2,7 @@ import { McpServer, fromJsonSchema } from '@modelcontextprotocol/server';
 import type { JsonSchemaType, McpRequestContext, McpServerFactory } from '@modelcontextprotocol/server';
 import logger from '../utils/logger.js';
 import { packageVersion } from './version.js';
-import { tools } from './mcp-tools.js';
+import { enabledTools } from './disabled-tools.js';
 import { callExcalidrawTool } from './mcp-dispatch.js';
 
 const SERVER_NAME = 'mcp-excalidraw-server';
@@ -11,8 +11,9 @@ const SERVER_DESCRIPTION =
 const SERVER_VERSION = packageVersion();
 
 // `tools/list` and `server/discover` are cacheable results on 2026-07-28
-// (SEP-2549): both are derived from the static tool table in `mcp-tools.ts`, so
-// a short shared TTL is safe. Canvas contents are never described by these
+// (SEP-2549): both are derived from the static tool table in `mcp-tools.ts`
+// (minus any `DISABLED_TOOLS`), so a short shared TTL is safe. Canvas contents
+// are never described by these
 // results — element data only ever travels through `tools/call`, which is not
 // a cacheable operation.
 const STATIC_SURFACE_CACHE_HINT = { ttlMs: 300_000, cacheScope: 'public' as const };
@@ -43,7 +44,7 @@ export function createExcalidrawMcpServer(ctx?: McpRequestContext): McpServer {
     }
   );
 
-  for (const tool of tools) {
+  for (const tool of enabledTools) {
     server.registerTool(
       tool.name,
       {
@@ -59,7 +60,7 @@ export function createExcalidrawMcpServer(ctx?: McpRequestContext): McpServer {
 
   logger.debug('Built Excalidraw MCP server instance', {
     era: ctx?.era ?? 'unknown',
-    toolCount: tools.length
+    toolCount: enabledTools.length
   });
 
   return server;

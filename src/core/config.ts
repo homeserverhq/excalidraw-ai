@@ -7,6 +7,12 @@ dotenv.config();
 export const EXPRESS_SERVER_URL = process.env.EXPRESS_SERVER_URL || 'http://127.0.0.1:3000';
 export const ENABLE_CANVAS_SYNC = process.env.ENABLE_CANVAS_SYNC !== 'false'; // Default to true
 
+// Public URL of the canvas UI, used in human-facing hints. Falls back to
+// EXPRESS_SERVER_URL so local/Docker setups keep working. This is display-only:
+// API calls and auto-start always use EXPRESS_SERVER_URL.
+export const EXCALIDRAW_PUBLIC_URL =
+  (process.env.EXCALIDRAW_PUBLIC_URL?.trim() || EXPRESS_SERVER_URL).replace(/\/+$/, '');
+
 // MCP server transport configuration. Defaults to stdio for MCP clients;
 // set MCP_TRANSPORT=http to serve the same tools over streamable HTTP.
 export const MCP_TRANSPORT = process.env.MCP_TRANSPORT === 'http' ? 'http' : 'stdio';

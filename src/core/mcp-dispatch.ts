@@ -7,7 +7,8 @@ import {
   ServerElement,
   ExcalidrawElementType
 } from '../types.js';
-import { EXPRESS_SERVER_URL } from './config.js';
+import { EXCALIDRAW_PUBLIC_URL } from './config.js';
+import { isToolDisabled } from './disabled-tools.js';
 import {
   updateElementOnCanvas,
   deleteElementOnCanvas,
@@ -135,6 +136,10 @@ export async function callExcalidrawTool(
   args: Record<string, unknown> | undefined
 ): Promise<CallToolResult> {
   try {
+    if (isToolDisabled(name)) {
+      throw new Error(`Tool '${name}' is disabled by DISABLED_TOOLS`);
+    }
+
     logger.info(`Handling tool call: ${name}`);
 
     if (toolNeedsCanvasBeforeDispatch(name)) {
@@ -417,7 +422,7 @@ export async function callExcalidrawTool(
           return {
             content: [{
               type: 'text',
-              text: `Mermaid diagram sent for conversion!\n\n${JSON.stringify(result, null, 2)}\n\n⚠️  Note: The actual conversion happens in the frontend canvas with DOM access. Open the canvas at ${EXPRESS_SERVER_URL} to see the diagram rendered.`
+              text: `Mermaid diagram sent for conversion!\n\n${JSON.stringify(result, null, 2)}\n\n⚠️  Note: The actual conversion happens in the frontend canvas with DOM access. Open the canvas at ${EXCALIDRAW_PUBLIC_URL} to see the diagram rendered.`
             }]
           };
         } catch (error) {

@@ -47,11 +47,13 @@ services:
     environment:
       - NODE_ENV=production
       - EXPRESS_SERVER_URL=http://canvas:3000
+      - EXCALIDRAW_PUBLIC_URL=${EXCALIDRAW_PUBLIC_URL:-}
       - ENABLE_CANVAS_SYNC=true
       - MCP_TRANSPORT=http
       - MCP_HOST=0.0.0.0
       - MCP_PORT=3100
       - LOG_LEVEL=info
+      - DISABLED_TOOLS=get_canvas_screenshot
     depends_on:
       canvas:
         condition: service_healthy
