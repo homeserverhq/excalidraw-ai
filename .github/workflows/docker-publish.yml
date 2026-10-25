@@ -38,6 +38,7 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/excalidraw-mcp
           tags: |
             type=ref,event=tag
+            type=match,pattern=^v(\d+\.\d+),group=1,prefix=v,priority=550
             type=match,pattern=^v(\d+),group=1,prefix=v,priority=500
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
@@ -79,6 +80,7 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/excalidraw-canvas
           tags: |
             type=ref,event=tag
+            type=match,pattern=^v(\d+\.\d+),group=1,prefix=v,priority=550
             type=match,pattern=^v(\d+),group=1,prefix=v,priority=500
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
